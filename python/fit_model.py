@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 
-def fit_one_gene_de(
+def fit_one_gene_bdgdm(
     gene_df: pd.DataFrame,
     model: "CmdStanModel",
     gene: str | None = None,
@@ -34,7 +34,7 @@ def fit_one_gene_de(
     adapt_delta: float = 0.9,
     max_treedepth: int = 12,
     rope_logfc: float = float(np.log(1.2)),
-    eps_frac: float = 0.10,          # ROPE on fracCN for ~10% change
+    eps_frac: float = 0.10,             # ROPE on fracCN for ~10% change
     return_all_subtypes: bool = True,
     engine: str = "nuts",               # "nuts", "vi_meanfield", "vi_fullrank"
     vi_iter: int = 20000,
@@ -50,15 +50,25 @@ def fit_one_gene_de(
     """
     Fit the Bayesian differential gene-dosage model for a single gene.
 
+    Supports two modes:
+      1. single_group: one shared subtype label, no subtype contrasts.
+      2. subtype_comparison: two or more subtype labels, includes rewiring contrasts.
+
     Required columns in gene_df:
         expr, copies, purity, sf, subtype_col
     Optional:
         gene (if gene_df contains multiple genes)
 
-    Expected generated quantities in Stan model:
+    Expected generated quantities in subtype_comparison model:
         delta_tumor0_log, delta_scaling, delta_dev,
         lp_2to1[s], lp_2to3[s], lp_2to4[s]
         posterior probability of direction (PPD) and ROPE probabilities
+
+    Expected generated quantities in single_group model:
+        lp_2to1[s], lp_2to3[s], lp_2to4[s]
+        posterior probability of direction (PPD) and ROPE probabilities
+    
+        
     Optional:
         lp_scaling_2to1[s], lp_dev_2to1[s],
         lp_scaling_2to3[s], lp_dev_2to3[s],
@@ -186,13 +196,16 @@ def fit_one_gene_de(
         subtype_codes = df[subtype_col].map(mapping).astype(int).to_numpy()
 
     S = len(levels)
-    if S < 2:
-        return {
-            "status": "skipped",
-            "gene": gene,
-            "reason": "need_at_least_2_subtypes_present_for_DE",
-        }
+    
+    if S < 1:
+        return {"status": "error", "gene": gene, "reason": "no_subtype_levels"}
 
+    analysis_mode = "single_group" if S == 1 else "subtype_comparison"
+
+    # choose Stan model
+    model = model_single if analysis_mode == "single_group" else model_subtype
+
+    
     # -------------- CN covariates ---------------#
     # effective CN for scaling: treat 0 and 1 as "1 copy"
     CN_eff = df["copies"].astype(float).clip(lower=1.0)
@@ -284,18 +297,15 @@ def fit_one_gene_de(
 
    # ---------- extract draws ----------#
     if using_mcmc:
-        d_tumor = fit.stan_variable("delta_tumor0_log")
-        d_scal = fit.stan_variable("delta_scaling")
-        d_dev = fit.stan_variable("delta_dev")
+        
         phi_arr = fit.stan_variable("phi")
         b_nc = fit.stan_variable("b_noncancer_log")
 
-        # subtype-specific vectors (draws, S)
         b0 = fit.stan_variable("b0")
         b_scaling = fit.stan_variable("b_scaling")
         b_deviation = fit.stan_variable("b_deviation")
 
-        # canonical transition summaries (draws, S)
+        # canonical transition summaries 
         lp_2to1 = fit.stan_variable("lp_2to1")
         lp_2to3 = fit.stan_variable("lp_2to3")
         lp_2to4 = fit.stan_variable("lp_2to4")
@@ -307,17 +317,15 @@ def fit_one_gene_de(
         lp_dev_2to3 = maybe_var_mcmc(fit, "lp_dev_2to3")
         lp_scaling_2to4 = maybe_var_mcmc(fit, "lp_scaling_2to4")
         lp_dev_2to4 = maybe_var_mcmc(fit, "lp_dev_2to4")
+        
+        if analysis_mode == "subtype_comparison":
+            d_tumor = fit.stan_variable("delta_tumor0_log")
+            d_scal = fit.stan_variable("delta_scaling")
+            d_dev = fit.stan_variable("delta_dev")
+        else:
+            d_tumor = d_scal = d_dev = None
 
     else:
-        # VI: arrays from draws_df
-        req = ["delta_tumor0_log", "delta_scaling", "delta_dev", "phi", "b_noncancer_log"]
-        missing_cols = [c for c in req if c not in draws_df.columns]
-        if missing_cols:
-            return {"status": "error", "gene": gene, "reason": f"missing_draws_columns: {missing_cols}"}
-
-        d_tumor = draws_df["delta_tumor0_log"].to_numpy()
-        d_scal = draws_df["delta_scaling"].to_numpy()
-        d_dev = draws_df["delta_dev"].to_numpy()
         phi_arr = draws_df["phi"].to_numpy()
         b_nc = draws_df["b_noncancer_log"].to_numpy()
 
@@ -336,139 +344,100 @@ def fit_one_gene_de(
         lp_scaling_2to4 = stack_param_vi(draws_df, "lp_scaling_2to4", S)
         lp_dev_2to4 = stack_param_vi(draws_df, "lp_dev_2to4", S)
 
-    # ---------- main summaries -----------#
-    
-    ln2 = np.log(2.0)
+        if analysis_mode == "subtype_comparison":
+            d_tumor = draws_df["delta_tumor0_log"].to_numpy()
+            d_scal = draws_df["delta_scaling"].to_numpy()
+            d_dev = draws_df["delta_dev"].to_numpy()
+        else:
+            d_tumor = d_scal = d_dev = None
+        
 
-    # tumor baseline contrast (stored in natural log units in Stan)
-    lfc_tumor = d_tumor / ln2
-    lfc_ci = q(lfc_tumor)
+    # ---------- output ----------
 
-    p_pos_tumor = float((d_tumor > 0).mean())
-    p_neg_tumor = float((d_tumor < 0).mean())
-    ppd_tumor = float(max(p_pos_tumor, p_neg_tumor))
-    p_rope_tumor = float((np.abs(d_tumor) <= rope_logfc).mean())
-
-    d_scal_q = q(d_scal)
-    p_pos_scal = float((d_scal > 0).mean())
-    p_neg_scal = float((d_scal < 0).mean())
-    ppd_scal = float(max(p_pos_scal, p_neg_scal))
-
-    d_dev_q = q(d_dev)
-    p_pos_dev = float((d_dev > 0).mean())
-    p_neg_dev = float((d_dev < 0).mean())
-    ppd_dev = float(max(p_pos_dev, p_neg_dev))
-
-    phi_q = q(phi_arr)
-    b_nc_q = q(b_nc)
-
-
-    out: dict[str, object] = {
+    out = {
         "status": "ok",
         "gene": gene,
         "N": int(len(df)),
-        "n_aneup": n_aneup,
+        "n_aneup": int(n_aneup),
         "cna": cna,
         "subtype_levels": levels,
+        "analysis_mode": analysis_mode,
         "engine": engine,
         "seed": int(seed),
         "output_dir": str(out_dir) if out_dir is not None else None,
 
-        "tumor0_lfc_median": float(lfc_ci[1]),
-        "tumor0_lfc_q025": float(lfc_ci[0]),
-        "tumor0_lfc_q975": float(lfc_ci[2]),
-        "ppd_tumor": ppd_tumor,
-        "p_pos_tumor": p_pos_tumor,
-        "p_neg_tumor": p_neg_tumor,
-        "p_rope_tumor": p_rope_tumor,
-
-        "delta_scaling_median": float(q(d_scal)[1]),
-        "delta_scaling_q025": float(q(d_scal)[0]),
-        "delta_scaling_q975": float(q(d_scal)[2]),
-        "ppd_scaling": ppd_scal,
-        "p_pos_scaling": p_pos_scal,
-        "p_neg_scaling": p_neg_scal,
-
-        "delta_dev_median": float(q(d_dev)[1]),
-        "delta_dev_q025": float(q(d_dev)[0]),
-        "delta_dev_q975": float(q(d_dev)[2]),
-        "ppd_dev": ppd_dev,
-        "p_pos_dev": p_pos_dev, 
-        "p_neg_dev": p_neg_dev,
-       
-
         "phi_median": float(q(phi_arr)[1]),
         "phi_q025": float(q(phi_arr)[0]),
         "phi_q975": float(q(phi_arr)[2]),
+
         "b_noncancer_log_median": float(q(b_nc)[1]),
         "b_noncancer_log_q025": float(q(b_nc)[0]),
         "b_noncancer_log_q975": float(q(b_nc)[2]),
     }
 
-    # ---------- subtype-specific summaries ----------#
+    # ---------- subtype contrast summaries only if S >= 2 ----------
+
+    if analysis_mode == "subtype_comparison":
+        ln2 = np.log(2.0)
+
+        lfc_tumor = d_tumor / ln2
+        out.update(summarize_draw_1d(lfc_tumor, "tumor0_lfc"))
+        out["ppd_tumor"] = ppd_from_draws(d_tumor)
+        out["p_rope_tumor"] = float((np.abs(d_tumor) <= rope_logfc).mean())
+
+        out.update(summarize_draw_1d(d_scal, "delta_scaling"))
+        out["ppd_scaling"] = ppd_from_draws(d_scal)
+
+        out.update(summarize_draw_1d(d_dev, "delta_dev"))
+        out["ppd_dev"] = ppd_from_draws(d_dev)
+
+    # ---------- subtype-specific summaries ----------
+
     s_iter = range(1, S + 1) if return_all_subtypes else range(1, min(S, 2) + 1)
 
-    if b0 is not None:
-        for s in s_iter:
-            s0 = s - 1
-            out.update(summarize_draw_2d(b0, s0, f"b0_s{s}"))
-    if b_scaling is not None:
-        for s in s_iter:
-            s0 = s - 1
-            out.update(summarize_draw_2d(b_scaling, s0, f"b_scaling_s{s}"))
-    if b_deviation is not None:
-        for s in s_iter:
-            s0 = s - 1
-            out.update(summarize_draw_2d(b_deviation, s0, f"b_deviation_s{s}"))
-
-    # transitions
     for s in s_iter:
         s0 = s - 1
-        if lp_2to1 is not None:
-            lp21 = lp_2to1[:, s0]
-            frac21 = np.expm1(lp21)
-            out.update(summarize_draw_1d(lp21, f"lp_2to1_s{s}"))
-            out.update(summarize_draw_1d(frac21, f"fracCN_2to1_s{s}"))
-            out[f"ppd_fracCN_2to1_s{s}"] = ppd_from_draws(frac21)
-            out[f"p_rope_fracCN_2to1_s{s}"] = float((np.abs(frac21) <= eps_frac).mean())
-            out[f"p_fracCN_2to1_pos_s{s}"] = float((frac21 > eps_frac).mean())
-            out[f"p_fracCN_2to1_neg_s{s}"] = float((frac21 < -eps_frac).mean())
 
-        if lp_2to3 is not None:
-            lp23 = lp_2to3[:, s0]
-            frac23 = np.expm1(lp23)
-            out.update(summarize_draw_1d(lp23, f"lp_2to3_s{s}"))
-            out.update(summarize_draw_1d(frac23, f"fracCN_2to3_s{s}"))
-            out[f"ppd_fracCN_2to3_s{s}"] = ppd_from_draws(frac23)
-            out[f"p_rope_fracCN_2to3_s{s}"] = float((np.abs(frac23) <= eps_frac).mean())
-            out[f"p_fracCN_2to3_pos_s{s}"] = float((frac23 > eps_frac).mean())
-            out[f"p_fracCN_2to3_neg_s{s}"] = float((frac23 < -eps_frac).mean())
+        if b0 is not None:
+            out.update(summarize_draw_2d(b0, s0, f"b0_s{s}"))
 
-        if lp_2to4 is not None:
-            lp24 = lp_2to4[:, s0]
-            frac24 = np.expm1(lp24)
-            out.update(summarize_draw_1d(lp24, f"lp_2to4_s{s}"))
-            out.update(summarize_draw_1d(frac24, f"fracCN_2to4_s{s}"))
-            out[f"ppd_fracCN_2to4_s{s}"] = ppd_from_draws(frac24)
-            out[f"p_rope_fracCN_2to4_s{s}"] = float((np.abs(frac24) <= eps_frac).mean())
-            out[f"p_fracCN_2to4_pos_s{s}"] = float((frac24 > eps_frac).mean())
-            out[f"p_fracCN_2to4_neg_s{s}"] = float((frac24 < -eps_frac).mean())
+        if b_scaling is not None:
+            out.update(summarize_draw_2d(b_scaling, s0, f"b_scaling_s{s}"))
 
-        # optional mechanistic decomposition
-        if lp_scaling_2to1 is not None:
-            out.update(summarize_draw_1d(lp_scaling_2to1[:, s0], f"lp_scaling_2to1_s{s}"))
-        if lp_dev_2to1 is not None:
-            out.update(summarize_draw_1d(lp_dev_2to1[:, s0], f"lp_dev_2to1_s{s}"))
+        if b_deviation is not None:
+            out.update(summarize_draw_2d(b_deviation, s0, f"b_deviation_s{s}"))
 
-        if lp_scaling_2to3 is not None:
-            out.update(summarize_draw_1d(lp_scaling_2to3[:, s0], f"lp_scaling_2to3_s{s}"))
-        if lp_dev_2to3 is not None:
-            out.update(summarize_draw_1d(lp_dev_2to3[:, s0], f"lp_dev_2to3_s{s}"))
+        for trans, arr in {
+            "2to1": lp_2to1,
+            "2to3": lp_2to3,
+            "2to4": lp_2to4,
+        }.items():
+            if arr is None:
+                continue
 
-        if lp_scaling_2to4 is not None:
-            out.update(summarize_draw_1d(lp_scaling_2to4[:, s0], f"lp_scaling_2to4_s{s}"))
-        if lp_dev_2to4 is not None:
-            out.update(summarize_draw_1d(lp_dev_2to4[:, s0], f"lp_dev_2to4_s{s}"))
+            lp = arr[:, s0]
+            frac = np.expm1(lp)
+
+            out.update(summarize_draw_1d(lp, f"lp_{trans}_s{s}"))
+            out.update(summarize_draw_1d(frac, f"fracCN_{trans}_s{s}"))
+
+            out[f"ppd_fracCN_{trans}_s{s}"] = ppd_from_draws(frac)
+            out[f"p_rope_fracCN_{trans}_s{s}"] = float((np.abs(frac) <= eps_frac).mean())
+            out[f"p_fracCN_{trans}_pos_s{s}"] = float((frac > eps_frac).mean())
+            out[f"p_fracCN_{trans}_neg_s{s}"] = float((frac < -eps_frac).mean())
+
+        optional_arrays = {
+            "lp_scaling_2to1": lp_scaling_2to1,
+            "lp_dev_2to1": lp_dev_2to1,
+            "lp_scaling_2to3": lp_scaling_2to3,
+            "lp_dev_2to3": lp_dev_2to3,
+            "lp_scaling_2to4": lp_scaling_2to4,
+            "lp_dev_2to4": lp_dev_2to4,
+        }
+
+        for name, arr in optional_arrays.items():
+            if arr is not None:
+                out.update(summarize_draw_1d(arr[:, s0], f"{name}_s{s}"))
 
     
     # ---------- PPC ----------#
@@ -570,24 +539,29 @@ def fit_one_gene_de(
         out["diagnose"] = None
         out["fit_flag"] = "ok"
 
-    # ---------- optional: save a compact subset of draws ----------#
-    if save_draws:
-        # Save small NPZ with only core arrays (much smaller than draws_pd)
-        if out_dir is not None and using_mcmc:
-            keep_path = out_dir / "draws_subset.npz"
-            np.savez_compressed(
-                keep_path,
-                delta_tumor0_log=d_tumor,
-                delta_scaling=d_scal,
-                delta_dev=d_dev,
-                phi=phi_arr,
-                b_noncancer_log=b_nc,
-                b0=b0 if b0 is not None else np.array([]),
-                b_scaling=b_scaling if b_scaling is not None else np.array([]),
-                b_deviation=b_deviation if b_deviation is not None else np.array([]),
+   # ---------- save compact draws ----------
+
+    if save_draws and out_dir is not None and using_mcmc:
+        keep_path = out_dir / "draws_subset.npz"
+
+        save_dict = {
+            "phi": phi_arr,
+            "b_noncancer_log": b_nc,
+            "b0": b0 if b0 is not None else np.array([]),
+            "b_scaling": b_scaling if b_scaling is not None else np.array([]),
+            "b_deviation": b_deviation if b_deviation is not None else np.array([]),
+        }
+
+        if analysis_mode == "subtype_comparison":
+            save_dict.update(
+                {
+                    "delta_tumor0_log": d_tumor,
+                    "delta_scaling": d_scal,
+                    "delta_dev": d_dev,
+                }
             )
-            out["draws_subset_path"] = str(keep_path)
-        else:
-            out["draws_subset_path"] = None
+
+        np.savez_compressed(keep_path, **save_dict)
+        out["draws_subset_path"] = str(keep_path)
 
     return out
