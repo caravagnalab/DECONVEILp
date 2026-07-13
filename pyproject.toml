@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bdgdm"
+version = "0.1.0"
+description = "Bayesian Differential Gene Dosage Model"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+  { name = "Katsiaryna Davydzenka" }
+]
+dependencies = [
+  "numpy",
+  "pandas",
+  "cmdstanpy",
+  "scipy"
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest",
+  "pytest-cov"
+]
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bdgdm*"]
+
+[tool.setuptools.package-data]
+bdgdm = [
+  "stan/*.stan",
+  "data/*.csv"
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
