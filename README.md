@@ -16,6 +16,7 @@ BDGDM is a Bayesian framework for modelling copy-number-dependent transcriptiona
 - Quantifies **uncertainty** through posterior distributions and credible intervals.
 - Detects **subtype-specific dosage rewiring** by comparing CN–expression relationships across tumour subtypes.
 - Scales from **single-group analyses** to **multi-subtype comparisons** within a unified Bayesian framework.
+  
 
 ### Installation
 
@@ -25,20 +26,22 @@ Install the current development version:
 
 - clone or download the repository, then open a terminal in the project root—the directory containing `pyproject.toml`:
 
-`cd DECONVEILp`
+  `cd DECONVEILp`
 
 - create and activate a dedicated Conda environment:
   
-`conda create -n bdgdm python=3.11`
-`conda activate bdgdm`
+  `conda create -n bdgdm python=3.11`
+
+  `conda activate bdgdm`
 
 - install the package:
 
-`python -m pip install .`
+  `python -m pip install .`
 
 **Install CmdStan**
 
 `python -c "import cmdstanpy; cmdstanpy.install_cmdstan()"`
+
 
 ### Copyright and contacts
 
