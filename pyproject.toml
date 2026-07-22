@@ -1,23 +1,52 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
+
 
 [project]
 name = "bdgdm"
 version = "0.1.0"
-description = "Bayesian Differential Gene Dosage Model"
+description = "Bayesian Differential Gene Dosage Model for tumour RNA-seq"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+
+license = "MIT"
+license-files = ["LICENSE"]
+
 authors = [
   { name = "Katsiaryna Davydzenka" }
 ]
+
+keywords = [
+  "bioinformatics",
+  "cancer genomics",
+  "RNA-seq",
+  "copy number variation",
+  "Bayesian modelling",
+  "gene dosage",
+  "CmdStan"
+]
+
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+  "Topic :: Scientific/Engineering :: Bio-Informatics"
+]
+
 dependencies = [
   "numpy",
   "pandas",
   "cmdstanpy",
-  "scipy"
+  "scipy",
+  "matplotlib"
 ]
+
 
 [project.optional-dependencies]
 test = [
@@ -25,19 +54,54 @@ test = [
   "pytest-cov"
 ]
 
+docs = [
+  "sphinx",
+  "sphinx-rtd-theme",
+  "sphinx-autoapi",
+  "myst-nb"
+]
+
+notebooks = [
+  "jupyterlab",
+  "ipykernel"
+]
+
+dev = [
+  "pytest",
+  "pytest-cov",
+  "sphinx",
+  "sphinx-rtd-theme",
+  "sphinx-autoapi",
+  "myst-nb",
+  "jupyterlab",
+  "ipykernel",
+  "build",
+  "twine"
+]
+
+
 [tool.setuptools]
 include-package-data = true
+
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["bdgdm*"]
 
+
 [tool.setuptools.package-data]
 bdgdm = [
   "stan/*.stan",
-  "data/*.csv"
+  "data/*.csv",
+  "data/*.csv.gz",
+  "data/*.json"
 ]
+
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = [
+  "--strict-markers",
+  "--strict-config"
+]
