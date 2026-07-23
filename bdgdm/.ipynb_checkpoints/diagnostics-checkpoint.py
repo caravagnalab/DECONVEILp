@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from typing import Any
 
 import numpy as np
@@ -6,7 +7,9 @@ import pandas as pd
 
 
 """
+
 Diagnostics for BDGDM Stan fits.
+
 """
 
 def _safe_max(x):
@@ -348,101 +351,3 @@ def sampler_diagnostics(
         output["diagnostic_status"] = "unknown"
 
     return output
-
-def get_nuts_diagnostics(
-    diagnostics,
-    *,
-    rhat_threshold=1.01,
-    minimum_ess=400,
-):
-    """
-    Summarize the main NUTS diagnostics.
-
-    Parameters
-    ----------
-    diagnostics : dict
-        BDGDM diagnostics dictionary.
-
-    rhat_threshold : float
-        Maximum acceptable R-hat.
-
-    minimum_ess : int
-        Minimum acceptable bulk effective sample size.
-
-    Returns
-    -------
-    pandas.DataFrame
-        Diagnostic checks and their pass/fail status.
-    """
-    max_rhat = diagnostics.get(
-        "max_rhat",
-        np.nan,
-    )
-    min_bulk_ess = diagnostics.get(
-        "min_bulk_ess",
-        np.nan,
-    )
-    n_divergent = diagnostics.get(
-        "n_divergent",
-        np.nan,
-    )
-
-    checks = [
-        {
-            "check": "Overall diagnostic status",
-            "value": diagnostics.get(
-                "diagnostic_status"
-            ),
-            "passed": diagnostics.get(
-                "diagnostic_status"
-            ) == "ok",
-        },
-        {
-            "check": "Convergence flag",
-            "value": diagnostics.get(
-                "converged"
-            ),
-            "passed": bool(
-                diagnostics.get(
-                    "converged",
-                    False,
-                )
-            ),
-        },
-        {
-            "check": "Maximum R-hat",
-            "value": max_rhat,
-            "passed": (
-                np.isfinite(max_rhat)
-                and max_rhat <= rhat_threshold
-            ),
-        },
-        {
-            "check": "Minimum bulk ESS",
-            "value": min_bulk_ess,
-            "passed": (
-                np.isfinite(min_bulk_ess)
-                and min_bulk_ess >= minimum_ess
-            ),
-        },
-        {
-            "check": "Divergent transitions",
-            "value": n_divergent,
-            "passed": n_divergent == 0,
-        },
-        {
-            "check": "Recorded warnings",
-            "value": len(
-                diagnostics.get(
-                    "warnings",
-                    [],
-                )
-            ),
-            "passed": not diagnostics.get(
-                "warnings",
-                [],
-            ),
-        },
-    ]
-
-    return pd.DataFrame(checks)

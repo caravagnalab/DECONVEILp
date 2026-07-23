@@ -1,5 +1,5 @@
 # DECONVEILp
-BDGDM is a Bayesian framework that quantify copy-number-dependent transcriptional signal from bulk RNA-seq data.
+BDGDM is a Bayesian framework that quantify copy-number-dependent transcriptional signal from bulk RNA-seq and WGS.
 
 ### Features
 
@@ -19,25 +19,13 @@ BDGDM is a Bayesian framework that quantify copy-number-dependent transcriptiona
 ### Installation
 
 BDGDM requires Python 3.10 or later and uses CmdStanPy as its interface to Stan.
-
 Install the current development version:
-
 - clone or download the repository, then open a terminal in the project root—the directory containing `pyproject.toml`:
-
   `cd DECONVEILp`
-
-- create and activate a dedicated Conda environment:
-  
-  `conda create -n bdgdm python=3.11`
-
-  `conda activate bdgdm`
-
 - install the package:
-
   `python -m pip install .`
 
 **Install CmdStan**
-
 `python -c "import cmdstanpy; cmdstanpy.install_cmdstan()"`
 
 

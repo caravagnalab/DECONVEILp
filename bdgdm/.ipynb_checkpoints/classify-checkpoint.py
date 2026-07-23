@@ -33,11 +33,6 @@ __all__ = [
     "classify_gene_result",
     "classify_fits",
     "classify_results_dataframe",
-    "get_response_class",
-    "get_subtype_classification",
-    "get_transition_classification",
-    "classification_to_subtype_dataframe",
-    "classification_to_transition_dataframe",
     "genes_with_response_class",
     "summarize_response_classes",
     "summarize_transition_patterns",
@@ -59,20 +54,7 @@ class ClassificationThresholds:
     # Evidence that the deviation coefficient is practically small.
     dev_small_prob: float = 0.75
 
-    # Transition-response thresholds relative to the canonical
-    # proportional log-response.
-    #
-    # response_ratio = observed_log_effect / canonical_log_effect
-    #
-    # cancel_threshold=0.20:
-    #     response_ratio < 0.80 is buffered.
-    # overcomp_threshold=1.00:
-    #     response_ratio < 0 indicates sign reversal/overcompensation.
-    # hyper_threshold=0.50:
-    #     response_ratio > 1.50 is hyper-responsive.
-    #
-    # The stored cancellation index is retained as a descriptive output,
-    # but it no longer defines HYPER.
+    # Cancellation-index thresholds.
     cancel_threshold: float = 0.20
     overcomp_threshold: float = 1.00
     hyper_threshold: float = 0.50
@@ -309,166 +291,27 @@ def _transition_ci(
     return float("nan")
 
 
-
-def _canonical_log_effect(transition: str) -> float:
-    """Return the canonical proportional log-expression change."""
-    canonical = {
-        "2to1": float(np.log(1.0 / 2.0)),
-        "2to3": float(np.log(3.0 / 2.0)),
-        "2to4": float(np.log(4.0 / 2.0)),
-    }
-
-    if transition not in canonical:
-        raise ValueError(
-            "transition must be one of '2to1', '2to3', or '2to4'."
-        )
-
-    return canonical[transition]
-
-
-def _transition_log_effect(
-    *,
-    log_effect_median: Any,
-    fractional_median: Any,
-) -> float:
-    """Read the log effect or derive it from the fractional change."""
-    if _is_finite_number(log_effect_median):
-        return float(log_effect_median)
-
-    if _is_finite_number(fractional_median):
-        fractional = float(fractional_median)
-
-        if fractional > -1.0:
-            return float(np.log1p(fractional))
-
-    return float("nan")
-
-
-def _transition_response_ratio(
-    *,
-    transition: str,
-    log_effect_median: Any,
-    fractional_median: Any,
-) -> float:
-    """
-    Compare the fitted transition effect with proportional dosage.
-
-    A value of 1 is proportional, values between 0 and 1 are attenuated,
-    values above 1 are stronger than proportional, and values below zero
-    reverse the canonical direction.
-    """
-    observed = _transition_log_effect(
-        log_effect_median=log_effect_median,
-        fractional_median=fractional_median,
-    )
-    canonical = _canonical_log_effect(transition)
-
-    if not _is_finite_number(observed):
-        return float("nan")
-
-    return float(observed / canonical)
-
-
-def _hyper_supported(
-    *,
-    transition: str,
-    log_effect_q025: Any,
-    log_effect_q975: Any,
-    response_ratio: Any,
-    thresholds: ClassificationThresholds,
-) -> tuple[bool, str]:
-    """
-    Test whether the complete credible interval is stronger than proportional.
-
-    ``hyper_threshold=0.50`` means that the log-response must be more than
-    1.5 times the canonical proportional log-response.
-    """
-    canonical = _canonical_log_effect(transition)
-    boundary = canonical * (1.0 + thresholds.hyper_threshold)
-
-    if (
-        _is_finite_number(log_effect_q025)
-        and _is_finite_number(log_effect_q975)
-    ):
-        if canonical > 0:
-            supported = float(log_effect_q025) > boundary
-        else:
-            supported = float(log_effect_q975) < boundary
-
-        return supported, "credible_interval"
-
-    if (
-        thresholds.allow_median_support_fallback
-        and _is_finite_number(response_ratio)
-    ):
-        return (
-            float(response_ratio)
-            > 1.0 + thresholds.hyper_threshold,
-            "median_fallback",
-        )
-
-    return False, "unavailable"
-
-
 def _transition_support(
     *,
     transition: str,
-    ppd_value: Any,
-    expected_direction_probability: Any,
-    opposite_direction_probability: Any,
+    direction_probability: Any,
     rope_probability: Any,
     fractional_median: Any,
     thresholds: ClassificationThresholds,
-) -> tuple[bool, bool, bool, str]:
-    """
-    Return expected-direction support, reverse-direction support, and null.
-
-    When PPD and ROPE probabilities are available, they are included in the
-    evidence rule rather than relying on a directional probability alone.
-    """
+) -> tuple[bool, bool, str]:
+    """Return supported, null, and evidence method for one transition."""
     is_null = (
         _is_finite_number(rope_probability)
         and float(rope_probability)
         >= thresholds.dose_prob_insensitive
     )
 
-    if is_null:
-        return False, False, True, "posterior_rope_null"
-
-    def direction_supported(probability: Any) -> bool:
-        if (
-            not _is_finite_number(probability)
-            or float(probability)
-            < thresholds.dose_prob_sensitive
-        ):
-            return False
-
-        if (
-            _is_finite_number(ppd_value)
-            and float(ppd_value) < thresholds.ppd_sig
-        ):
-            return False
-
-        if (
-            _is_finite_number(rope_probability)
-            and float(rope_probability) > thresholds.rope_low
-        ):
-            return False
-
-        return True
-
-    expected_supported = direction_supported(
-        expected_direction_probability
-    )
-    reverse_supported = direction_supported(
-        opposite_direction_probability
-    )
-
-    if expected_supported:
-        return True, False, False, "posterior_expected_direction"
-
-    if reverse_supported:
-        return False, True, False, "posterior_reverse_direction"
+    if (
+        _is_finite_number(direction_probability)
+        and float(direction_probability)
+        >= thresholds.dose_prob_sensitive
+    ):
+        return True, is_null, "posterior_direction"
 
     if (
         thresholds.allow_median_support_fallback
@@ -477,71 +320,66 @@ def _transition_support(
         median = float(fractional_median)
 
         if transition == "2to1":
-            expected_supported = median < -thresholds.frac_small_loss
-            reverse_supported = median > thresholds.frac_small_loss
+            supported = median < -thresholds.frac_small_loss
         elif transition == "2to3":
-            expected_supported = median > thresholds.frac_small_gain
-            reverse_supported = median < -thresholds.frac_small_gain
+            supported = median > thresholds.frac_small_gain
         elif transition == "2to4":
-            expected_supported = median > thresholds.frac_small_amp
-            reverse_supported = median < -thresholds.frac_small_amp
+            supported = median > thresholds.frac_small_amp
         else:
-            expected_supported = False
-            reverse_supported = False
+            supported = False
 
-        if expected_supported:
-            return True, False, False, "median_expected_fallback"
+        if supported:
+            return True, is_null, "median_fallback"
 
-        if reverse_supported:
-            return False, True, False, "median_reverse_fallback"
-
-    return False, False, False, "insufficient_support"
+    return False, is_null, "insufficient_support"
 
 
 def _classify_transition(
     *,
-    response_ratio: float,
-    expected_supported: bool,
-    reverse_supported: bool,
+    transition: str,
+    cancellation_index: float,
+    supported: bool,
     is_null: bool,
-    hyper_supported: bool,
+    scaling_stable: bool,
+    small_deviation: bool,
     thresholds: ClassificationThresholds,
 ) -> str:
-    """
-    Classify one CN transition relative to proportional dosage.
-
-    The classification is based on the total fitted transition effect, not on
-    the deviation-to-scaling cancellation index alone.
-    """
+    """Classify one CN transition."""
     if is_null:
         return "null"
 
-    if not _is_finite_number(response_ratio):
+    if not supported:
         return "weak"
 
-    ratio = float(response_ratio)
+    if not scaling_stable or not _is_finite_number(cancellation_index):
+        return "weak"
 
-    if reverse_supported:
-        if ratio < 1.0 - thresholds.overcomp_threshold:
+    ci = float(cancellation_index)
+
+    if transition in {"2to3", "2to4"}:
+        if ci < -thresholds.overcomp_threshold:
             return "overcompensated"
-
+        if ci < -thresholds.cancel_threshold:
+            return "buffered"
+        if ci > thresholds.hyper_threshold:
+            return "hyperactive"
+        if small_deviation and abs(ci) <= thresholds.cancel_threshold:
+            return "proportional"
         return "weak"
 
-    if not expected_supported:
+    if transition == "2to1":
+        if ci > thresholds.overcomp_threshold:
+            return "overcompensated"
+        if ci > thresholds.cancel_threshold:
+            return "buffered"
+        if ci < -thresholds.hyper_threshold:
+            return "hyperactive"
+        if small_deviation and abs(ci) <= thresholds.cancel_threshold:
+            return "proportional"
         return "weak"
 
-    if hyper_supported:
-        return "hyperactive"
+    return "weak"
 
-    if ratio < 1.0 - thresholds.overcomp_threshold:
-        return "overcompensated"
-
-    if ratio < 1.0 - thresholds.cancel_threshold:
-        return "buffered"
-
-    # Mild enhancement that does not pass the HYPER credible-interval rule
-    # remains dosage-sensitive/proportional rather than becoming UNC.
-    return "proportional"
 
 def interpret_baseline_de(
     result: Mapping[str, Any],
@@ -775,19 +613,9 @@ def interpret_subtype_dosage(
 
     transition_inputs = {
         "2to1": {
-            "ppd": _get(
-                result,
-                f"ppd_fracCN_2to1_s{subtype_index}",
-                np.nan,
-            ),
-            "expected_direction_probability": _get(
+            "direction_probability": _get(
                 result,
                 f"p_fracCN_2to1_neg_s{subtype_index}",
-                np.nan,
-            ),
-            "opposite_direction_probability": _get(
-                result,
-                f"p_fracCN_2to1_pos_s{subtype_index}",
                 np.nan,
             ),
             "rope_probability": _get(
@@ -800,36 +628,11 @@ def interpret_subtype_dosage(
                 f"fracCN_2to1_s{subtype_index}_median",
                 np.nan,
             ),
-            "lp_median": _get(
-                result,
-                f"lp_2to1_s{subtype_index}_median",
-                np.nan,
-            ),
-            "lp_q025": _get(
-                result,
-                f"lp_2to1_s{subtype_index}_q025",
-                np.nan,
-            ),
-            "lp_q975": _get(
-                result,
-                f"lp_2to1_s{subtype_index}_q975",
-                np.nan,
-            ),
         },
         "2to3": {
-            "ppd": _get(
-                result,
-                f"ppd_fracCN_2to3_s{subtype_index}",
-                np.nan,
-            ),
-            "expected_direction_probability": _get(
+            "direction_probability": _get(
                 result,
                 f"p_fracCN_2to3_pos_s{subtype_index}",
-                np.nan,
-            ),
-            "opposite_direction_probability": _get(
-                result,
-                f"p_fracCN_2to3_neg_s{subtype_index}",
                 np.nan,
             ),
             "rope_probability": _get(
@@ -842,36 +645,11 @@ def interpret_subtype_dosage(
                 f"fracCN_2to3_s{subtype_index}_median",
                 np.nan,
             ),
-            "lp_median": _get(
-                result,
-                f"lp_2to3_s{subtype_index}_median",
-                np.nan,
-            ),
-            "lp_q025": _get(
-                result,
-                f"lp_2to3_s{subtype_index}_q025",
-                np.nan,
-            ),
-            "lp_q975": _get(
-                result,
-                f"lp_2to3_s{subtype_index}_q975",
-                np.nan,
-            ),
         },
         "2to4": {
-            "ppd": _get(
-                result,
-                f"ppd_fracCN_2to4_s{subtype_index}",
-                np.nan,
-            ),
-            "expected_direction_probability": _get(
+            "direction_probability": _get(
                 result,
                 f"p_fracCN_2to4_pos_s{subtype_index}",
-                np.nan,
-            ),
-            "opposite_direction_probability": _get(
-                result,
-                f"p_fracCN_2to4_neg_s{subtype_index}",
                 np.nan,
             ),
             "rope_probability": _get(
@@ -882,21 +660,6 @@ def interpret_subtype_dosage(
             "fractional_median": _get(
                 result,
                 f"fracCN_2to4_s{subtype_index}_median",
-                np.nan,
-            ),
-            "lp_median": _get(
-                result,
-                f"lp_2to4_s{subtype_index}_median",
-                np.nan,
-            ),
-            "lp_q025": _get(
-                result,
-                f"lp_2to4_s{subtype_index}_q025",
-                np.nan,
-            ),
-            "lp_q975": _get(
-                result,
-                f"lp_2to4_s{subtype_index}_q975",
                 np.nan,
             ),
         },
@@ -937,19 +700,10 @@ def interpret_subtype_dosage(
     transition_results: dict[str, dict[str, Any]] = {}
 
     for transition, inputs in transition_inputs.items():
-        (
-            expected_supported,
-            reverse_supported,
-            is_null,
-            support_method,
-        ) = _transition_support(
+        supported, is_null, support_method = _transition_support(
             transition=transition,
-            ppd_value=inputs["ppd"],
-            expected_direction_probability=inputs[
-                "expected_direction_probability"
-            ],
-            opposite_direction_probability=inputs[
-                "opposite_direction_probability"
+            direction_probability=inputs[
+                "direction_probability"
             ],
             rope_probability=inputs["rope_probability"],
             fractional_median=inputs["fractional_median"],
@@ -986,54 +740,31 @@ def interpret_subtype_dosage(
             thresholds,
         )
 
-        response_ratio = _transition_response_ratio(
-            transition=transition,
-            log_effect_median=inputs["lp_median"],
-            fractional_median=inputs["fractional_median"],
-        )
-
-        (
-            transition_hyper_supported,
-            hyper_evidence_method,
-        ) = _hyper_supported(
-            transition=transition,
-            log_effect_q025=inputs["lp_q025"],
-            log_effect_q975=inputs["lp_q975"],
-            response_ratio=response_ratio,
-            thresholds=thresholds,
-        )
-
         pattern = _classify_transition(
-            response_ratio=response_ratio,
-            expected_supported=expected_supported,
-            reverse_supported=reverse_supported,
+            transition=transition,
+            cancellation_index=cancellation_index,
+            supported=supported,
             is_null=is_null,
-            hyper_supported=transition_hyper_supported,
+            scaling_stable=scaling_stable,
+            small_deviation=small_deviation,
             thresholds=thresholds,
         )
 
         transition_results[transition] = {
             "pattern": pattern,
-            "supported": (
-                expected_supported or reverse_supported
-            ),
-            "expected_supported": expected_supported,
-            "reverse_supported": reverse_supported,
+            "supported": supported,
             "null": is_null,
             "support_method": support_method,
             "cancellation_index": cancellation_index,
-            "response_ratio": response_ratio,
-            "hyper_supported": transition_hyper_supported,
-            "hyper_evidence_method": hyper_evidence_method,
-            "fractional_median": inputs["fractional_median"],
+            "fractional_median": inputs[
+                "fractional_median"
+            ],
             "direction_probability": inputs[
-                "expected_direction_probability"
+                "direction_probability"
             ],
-            "opposite_direction_probability": inputs[
-                "opposite_direction_probability"
+            "rope_probability": inputs[
+                "rope_probability"
             ],
-            "rope_probability": inputs["rope_probability"],
-            "ppd": inputs["ppd"],
             "scaling_stable": scaling_stable,
         }
 
@@ -1131,26 +862,6 @@ def interpret_subtype_dosage(
                     f"rope_probability_{transition}_"
                     f"{canonical_suffix}"
                 ): values["rope_probability"],
-                (
-                    f"ppd_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["ppd"],
-                (
-                    f"response_ratio_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["response_ratio"],
-                (
-                    f"hyper_supported_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["hyper_supported"],
-                (
-                    f"hyper_evidence_method_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["hyper_evidence_method"],
-                (
-                    f"reverse_supported_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["reverse_supported"],
             }
         )
 
@@ -1418,464 +1129,6 @@ def classify_results_dataframe(
         axis=1,
     )
 
-
-
-def _is_classified_result(result: Mapping[str, Any]) -> bool:
-    """Return True when a mapping already contains subtype class outputs."""
-    return any(
-        re.fullmatch(r"response_class_s\d+", str(key))
-        for key in result
-    )
-
-
-def _coerce_classification(
-    fit_or_result: Any,
-    thresholds: ClassificationThresholds | None = None,
-) -> dict[str, Any]:
-    """
-    Return a classified result from a fit, posterior summary, or class mapping.
-    """
-    if isinstance(fit_or_result, Mapping):
-        if _is_classified_result(fit_or_result):
-            return dict(fit_or_result)
-
-        return classify_gene_result(
-            fit_or_result,
-            thresholds=thresholds,
-        )
-
-    return classify_fit(
-        fit_or_result,
-        thresholds=thresholds,
-    )
-
-
-def _resolve_subtype_index(
-    classification: Mapping[str, Any],
-    subtype: int | str | None,
-) -> int:
-    """
-    Resolve a one-based subtype index from an index or human-readable label.
-    """
-    subtype_levels = normalize_subtype_levels(
-        classification.get(
-            "subtype_levels",
-            classification.get(
-                "subtype_order",
-                None,
-            ),
-        )
-    )
-
-    number_of_subtypes = classification.get(
-        "S",
-        classification.get(
-            "n_subtypes",
-            None,
-        ),
-    )
-
-    if not _is_finite_number(number_of_subtypes):
-        number_of_subtypes = (
-            len(subtype_levels)
-            or infer_num_subtypes(
-                classification,
-                default=1,
-            )
-        )
-
-    number_of_subtypes = int(number_of_subtypes)
-
-    if subtype is None:
-        if number_of_subtypes == 1:
-            return 1
-
-        raise ValueError(
-            "subtype must be specified when more than one subtype "
-            "is present."
-        )
-
-    if isinstance(subtype, (int, np.integer)):
-        subtype_index = int(subtype)
-
-    elif isinstance(subtype, str):
-        requested = subtype.strip()
-
-        if not requested:
-            raise ValueError("subtype label must be non-empty.")
-
-        match = re.fullmatch(r"[sS]?(\d+)", requested)
-
-        if match:
-            subtype_index = int(match.group(1))
-        else:
-            labels = [
-                str(
-                    classification.get(
-                        f"subtype_s{index}",
-                        subtype_name(
-                            index,
-                            subtype_levels,
-                        ),
-                    )
-                )
-                for index in range(
-                    1,
-                    number_of_subtypes + 1,
-                )
-            ]
-
-            exact_matches = [
-                index
-                for index, label in enumerate(
-                    labels,
-                    start=1,
-                )
-                if label == requested
-            ]
-
-            if not exact_matches:
-                folded = requested.casefold()
-                exact_matches = [
-                    index
-                    for index, label in enumerate(
-                        labels,
-                        start=1,
-                    )
-                    if label.casefold() == folded
-                ]
-
-            if len(exact_matches) != 1:
-                raise KeyError(
-                    f"Unknown subtype {subtype!r}. "
-                    f"Available subtypes: {labels}"
-                )
-
-            subtype_index = exact_matches[0]
-
-    else:
-        raise TypeError(
-            "subtype must be None, a one-based integer, or a label."
-        )
-
-    if not 1 <= subtype_index <= number_of_subtypes:
-        raise IndexError(
-            f"Subtype index must lie between 1 and "
-            f"{number_of_subtypes}; received {subtype_index}."
-        )
-
-    return subtype_index
-
-
-def get_subtype_classification(
-    fit_or_result: Any,
-    subtype: int | str | None = None,
-    thresholds: ClassificationThresholds | None = None,
-) -> dict[str, Any]:
-    """
-    Return a compact classification summary for one subtype.
-
-    Parameters
-    ----------
-    fit_or_result
-        A ``BDGDMFit`` object, a flat posterior-summary mapping, or an
-        already classified mapping.
-
-    subtype
-        One-based subtype index or human-readable subtype label. It may be
-        omitted when the result contains only one subtype.
-
-    thresholds
-        Classification thresholds used only when classification has not
-        already been performed.
-
-    Returns
-    -------
-    dict
-        Compact subtype-level classification information.
-    """
-    classification = _coerce_classification(
-        fit_or_result,
-        thresholds=thresholds,
-    )
-    subtype_index = _resolve_subtype_index(
-        classification,
-        subtype,
-    )
-    suffix = f"s{subtype_index}"
-    subtype_label = classification.get(
-        f"subtype_{suffix}",
-        subtype_name(
-            subtype_index,
-            normalize_subtype_levels(
-                classification.get(
-                    "subtype_levels",
-                    None,
-                )
-            ),
-        ),
-    )
-
-    return {
-        "gene": classification.get("gene"),
-        "status": classification.get("status"),
-        "fit_flag": classification.get("fit_flag"),
-        "analysis_mode": classification.get("analysis_mode"),
-        "N": classification.get("N"),
-        "n_aneup": classification.get("n_aneup"),
-        "cna": classification.get("cna"),
-        "subtype_index": subtype_index,
-        "subtype": subtype_label,
-        "response_class": classification.get(
-            f"response_class_{suffix}"
-        ),
-        "response_reason": classification.get(
-            f"response_reason_{suffix}"
-        ),
-        "response_subclass": classification.get(
-            f"response_subclass_{suffix}"
-        ),
-        "b_scaling_median": classification.get(
-            f"b_scaling_median_{suffix}"
-        ),
-        "b_deviation_median": classification.get(
-            f"b_deviation_median_{suffix}"
-        ),
-        "p_deviation_small": classification.get(
-            f"p_deviation_small_{suffix}"
-        ),
-        "small_deviation": classification.get(
-            f"small_deviation_{suffix}"
-        ),
-        "small_deviation_method": classification.get(
-            f"small_deviation_method_{suffix}"
-        ),
-        "dc_gain": classification.get(
-            f"dc_gain_{suffix}"
-        ),
-        "dc_loss": classification.get(
-            f"dc_loss_{suffix}"
-        ),
-        "dc_type": classification.get(
-            f"dc_type_{suffix}"
-        ),
-    }
-
-
-def get_response_class(
-    fit_or_result: Any,
-    subtype: int | str | None = None,
-    thresholds: ClassificationThresholds | None = None,
-) -> str | None:
-    """
-    Return only the final response class for one subtype.
-    """
-    return get_subtype_classification(
-        fit_or_result,
-        subtype=subtype,
-        thresholds=thresholds,
-    )["response_class"]
-
-
-def get_transition_classification(
-    fit_or_result: Any,
-    transition: str,
-    subtype: int | str | None = None,
-    thresholds: ClassificationThresholds | None = None,
-) -> dict[str, Any]:
-    """
-    Return detailed classification evidence for one CN transition.
-
-    Parameters
-    ----------
-    transition
-        One of ``"2to1"``, ``"2to3"``, ``"2to4"`` or the corresponding
-        arrow notation, for example ``"2→3"``.
-    """
-    normalized_transition = (
-        str(transition)
-        .strip()
-        .replace("→", "to")
-        .replace("->", "to")
-        .replace(" ", "")
-    )
-
-    if normalized_transition not in {
-        "2to1",
-        "2to3",
-        "2to4",
-    }:
-        raise ValueError(
-            "transition must be one of '2to1', '2to3', or '2to4'."
-        )
-
-    classification = _coerce_classification(
-        fit_or_result,
-        thresholds=thresholds,
-    )
-    subtype_index = _resolve_subtype_index(
-        classification,
-        subtype,
-    )
-    suffix = f"s{subtype_index}"
-    subtype_label = classification.get(
-        f"subtype_{suffix}",
-        subtype_name(
-            subtype_index,
-            normalize_subtype_levels(
-                classification.get(
-                    "subtype_levels",
-                    None,
-                )
-            ),
-        ),
-    )
-
-    return {
-        "gene": classification.get("gene"),
-        "subtype_index": subtype_index,
-        "subtype": subtype_label,
-        "transition": normalized_transition.replace(
-            "to",
-            "→",
-        ),
-        "transition_key": normalized_transition,
-        "pattern": classification.get(
-            f"transition_{normalized_transition}_{suffix}"
-        ),
-        "supported": classification.get(
-            f"transition_supported_{normalized_transition}_{suffix}"
-        ),
-        "null": classification.get(
-            f"transition_null_{normalized_transition}_{suffix}"
-        ),
-        "support_method": classification.get(
-            f"transition_support_method_{normalized_transition}_{suffix}"
-        ),
-        "fractional_change_median": classification.get(
-            f"fracCN_{normalized_transition}_median_{suffix}"
-        ),
-        "direction_probability": classification.get(
-            f"direction_probability_{normalized_transition}_{suffix}"
-        ),
-        "rope_probability": classification.get(
-            f"rope_probability_{normalized_transition}_{suffix}"
-        ),
-        "ppd": classification.get(
-            f"ppd_{normalized_transition}_{suffix}"
-        ),
-        "response_ratio": classification.get(
-            f"response_ratio_{normalized_transition}_{suffix}"
-        ),
-        "hyper_supported": classification.get(
-            f"hyper_supported_{normalized_transition}_{suffix}"
-        ),
-        "hyper_evidence_method": classification.get(
-            f"hyper_evidence_method_{normalized_transition}_{suffix}"
-        ),
-        "reverse_supported": classification.get(
-            f"reverse_supported_{normalized_transition}_{suffix}"
-        ),
-        "cancellation_index": classification.get(
-            f"cancel_index_{normalized_transition}_{suffix}"
-        ),
-    }
-
-
-def classification_to_subtype_dataframe(
-    fit_or_result: Any,
-    thresholds: ClassificationThresholds | None = None,
-) -> pd.DataFrame:
-    """
-    Convert one classified result into one tidy row per subtype.
-    """
-    classification = _coerce_classification(
-        fit_or_result,
-        thresholds=thresholds,
-    )
-
-    number_of_subtypes = classification.get(
-        "S",
-        classification.get(
-            "n_subtypes",
-            infer_num_subtypes(
-                classification,
-                default=1,
-            ),
-        ),
-    )
-    number_of_subtypes = int(number_of_subtypes)
-
-    return pd.DataFrame.from_records(
-        [
-            get_subtype_classification(
-                classification,
-                subtype=index,
-            )
-            for index in range(
-                1,
-                number_of_subtypes + 1,
-            )
-        ]
-    )
-
-
-def get_transition_df(
-    fit_or_result: Any,
-    subtype: int | str | None = None,
-    thresholds: ClassificationThresholds | None = None,
-) -> pd.DataFrame:
-    """
-    Convert transition evidence into a tidy DataFrame.
-
-    When ``subtype`` is omitted for a multi-subtype result, transitions for
-    all subtypes are returned.
-    """
-    classification = _coerce_classification(
-        fit_or_result,
-        thresholds=thresholds,
-    )
-
-    if subtype is None:
-        number_of_subtypes = classification.get(
-            "S",
-            classification.get(
-                "n_subtypes",
-                infer_num_subtypes(
-                    classification,
-                    default=1,
-                ),
-            ),
-        )
-        subtype_indices = range(
-            1,
-            int(number_of_subtypes) + 1,
-        )
-    else:
-        subtype_indices = [
-            _resolve_subtype_index(
-                classification,
-                subtype,
-            )
-        ]
-
-    records = []
-
-    for subtype_index in subtype_indices:
-        for transition in (
-            "2to1",
-            "2to3",
-            "2to4",
-        ):
-            records.append(
-                get_transition_classification(
-                    classification,
-                    transition=transition,
-                    subtype=subtype_index,
-                )
-            )
-
-    return pd.DataFrame.from_records(records)
 
 def summarize_response_classes(
     classified_dataframe: pd.DataFrame,
