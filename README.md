@@ -33,17 +33,16 @@ python -m pip install -e .
 
 ### Single-group analysis
 
-The [single-group vignette](single_group.ipynb) demonstrates how to fit and interpret one gene in a single tumour type/subtype. It covers posterior
+The [single-group vignette](https://github.com/caravagnalab/DECONVEILp/blob/main/docs/single_group.ipynb) demonstrates how to fit and interpret one gene in a single tumour type/subtype. It covers posterior
 parameters, CN-transition effects, diagnostics, posterior predictive checks, and dosage-response classification.
 
 ### Subtype comparison
 
-The [subtype-comparison vignette](subtype_comparison.ipynb) demonstrates how to jointly estimate gene-dosage responses across tumour subtypes. It covers subtype-specific parameters, direct scaling and deviation contrasts, classification, and dosage-response rewiring.
+The [subtype-comparison vignette](https://github.com/caravagnalab/DECONVEILp/blob/main/docs/subtype_comparison.ipynb) demonstrates how to jointly estimate gene-dosage responses across tumour subtypes. It covers subtype-specific parameters, direct scaling and deviation contrasts, classification, and dosage-response rewiring.
 
 ### Multigene analysis
 
-The [multigene-analysis vignette](multigene_analysis.ipynb) extends the workflow to a set of informative genes. It covers gene selection, batch
-fitting, diagnostic filtering, response-class summaries, transition patterns, rewiring, and result export.
+The [multigene-analysis vignette](https://github.com/caravagnalab/DECONVEILp/blob/main/docs/multigene_analysis.ipynb) extends the workflow to a set of informative genes. It covers gene selection, batch fitting, diagnostic filtering, response-class summaries, transition patterns and dosage-response rewiring.
 
 
 ### Copyright and contacts
