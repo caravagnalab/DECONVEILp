@@ -36,8 +36,10 @@ __all__ = [
     "get_response_class",
     "get_subtype_classification",
     "get_transition_classification",
-    "classification_to_subtype_dataframe",
-    "classification_to_transition_dataframe",
+    "get_rewiring_summary",
+    "classification_to_subtype_df",
+    "classification_to_transition_df",
+    "classification_to_rewiring_df",
     "genes_with_response_class",
     "summarize_response_classes",
     "summarize_transition_patterns",
@@ -1419,14 +1421,12 @@ def classify_results_dataframe(
     )
 
 
-
 def _is_classified_result(result: Mapping[str, Any]) -> bool:
     """Return True when a mapping already contains subtype class outputs."""
     return any(
         re.fullmatch(r"response_class_s\d+", str(key))
         for key in result
     )
-
 
 def _coerce_classification(
     fit_or_result: Any,
@@ -1782,7 +1782,7 @@ def get_transition_classification(
     }
 
 
-def classification_to_subtype_dataframe(
+def classification_to_subtype_df(
     fit_or_result: Any,
     thresholds: ClassificationThresholds | None = None,
 ) -> pd.DataFrame:
@@ -1948,5 +1948,152 @@ def genes_with_response_class(
     return classified_dataframe.loc[keep].copy()
 
 
+def get_rewiring_summary(
+    fit_or_result: Any,
+    thresholds: ClassificationThresholds | None = None,
+) -> dict[str, Any]:
+    """
+    Return a compact subtype-rewiring summary.
 
+    Parameters
+    ----------
+    fit_or_result
+        A ``BDGDMFit`` object, a flat posterior-summary mapping,
+        or an already classified mapping.
 
+    thresholds
+        Classification thresholds used only when classification
+        has not already been performed.
+
+    Returns
+    -------
+    dict
+        Rewiring status and posterior contrast evidence.
+    """
+    classification = _coerce_classification(
+        fit_or_result,
+        thresholds=thresholds,
+    )
+
+    subtype_levels = normalize_subtype_levels(
+        classification.get(
+            "subtype_levels",
+            classification.get(
+                "subtype_order",
+                None,
+            ),
+        )
+    )
+
+    return {
+        "gene": classification.get("gene"),
+        "status": classification.get("status"),
+        "fit_flag": classification.get("fit_flag"),
+        "analysis_mode": classification.get(
+            "analysis_mode"
+        ),
+        "n_subtypes": classification.get(
+            "S",
+            classification.get(
+                "n_subtypes",
+                len(subtype_levels),
+            ),
+        ),
+        "subtype_levels": subtype_levels,
+        "subtype_levels_str": "|".join(
+            subtype_levels
+        ),
+
+        # Overall rewiring interpretation
+        "rewiring_status": classification.get(
+            "rewiring_status"
+        ),
+        "scaling_rewired": classification.get(
+            "scaling_rewired"
+        ),
+        "deviation_rewired": classification.get(
+            "deviation_rewired"
+        ),
+
+        # Evidence source
+        "scaling_rewiring_evidence": (
+            classification.get(
+                "scaling_rewiring_evidence"
+            )
+        ),
+        "deviation_rewiring_evidence": (
+            classification.get(
+                "deviation_rewiring_evidence"
+            )
+        ),
+
+        # Scaling contrast
+        "delta_scaling_median": classification.get(
+            "delta_scaling_median"
+        ),
+        "delta_scaling_q025": classification.get(
+            "delta_scaling_q025"
+        ),
+        "delta_scaling_q975": classification.get(
+            "delta_scaling_q975"
+        ),
+        "ppd_scaling": classification.get(
+            "ppd_scaling"
+        ),
+        "p_rope_scaling": classification.get(
+            "p_rope_scaling"
+        ),
+
+        # Deviation contrast
+        "delta_dev_median": classification.get(
+            "delta_dev_median"
+        ),
+        "delta_dev_q025": classification.get(
+            "delta_dev_q025"
+        ),
+        "delta_dev_q975": classification.get(
+            "delta_dev_q975"
+        ),
+        "ppd_dev": classification.get(
+            "ppd_dev"
+        ),
+        "p_rope_dev": classification.get(
+            "p_rope_dev"
+        ),
+
+        # Convenient complete label
+        "summary_label": classification.get(
+            "summary_label"
+        ),
+    }
+
+def classification_to_rewiring_df(
+    fit_or_result: Any,
+    thresholds: ClassificationThresholds | None = None,
+) -> pd.DataFrame:
+    """
+    Convert a rewiring summary into a one-row tidy DataFrame.
+
+    Parameters
+    ----------
+    fit_or_result
+        A ``BDGDMFit`` object, a posterior-summary mapping,
+        or an already classified mapping.
+
+    thresholds
+        Classification thresholds used only when classification
+        has not already been performed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One-row rewiring summary.
+    """
+    rewiring = get_rewiring_summary(
+        fit_or_result,
+        thresholds=thresholds,
+    )
+
+    return pd.DataFrame(
+        [rewiring]
+    )

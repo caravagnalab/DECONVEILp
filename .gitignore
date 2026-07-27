@@ -1,2 +1,16 @@
- .DS_Store
- .ipynb_checkpoints
+# macOS
+.DS_Store
+
+# Jupyter
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
+*-checkpoint.py
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Sphinx
+docs/_build/
+docs/api/
+docs/.jupyter_cache/

@@ -3,11 +3,13 @@ README.md
 pyproject.toml
 bdgdm/__init__.py
 bdgdm/classify.py
+bdgdm/classify_old.py
 bdgdm/data.py
 bdgdm/diagnostics.py
 bdgdm/fit.py
 bdgdm/fit_model_old_ver.py
 bdgdm/inference.py
+bdgdm/inference_old.py
 bdgdm/interpreter_old.py
 bdgdm/model.py
 bdgdm/plot_classification.py

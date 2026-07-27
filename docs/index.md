@@ -1,28 +1,57 @@
-```{include} ../README.md
+# BDGDM documentation
+
+**BDGDM — Bayesian Differential Gene Dosage Model** is a Bayesian framework for quantifying copy-number-dependent transcriptional responses from bulk
+RNA-seq data using tumour purity and gene-level absolute copy-number estimates.
+
+
+The package supports:
+
+- tumour-only transcriptomic datasets without requiring matched normal samples; 
+- single-group and subtype-comparison dosage-response analysis;
+- posterior classification of dosage responses as dosage-sensitive (`DSG`), dosage-compensated (`DCG`), hyper-responsive (`HYPER`), mixed (`Mixed`),
+  dosage-insensitive (`DIG`), or uncertain (`UNC`);
+- direct Bayesian assessment of subtype-specific dosage-response rewiring.
+
+## Installation
+
+BDGDM requires Python 3.10 or later and uses [CmdStanPy](https://mc-stan.org/cmdstanpy/) for Bayesian inference.
+Before fitting BDGDM models, install CmdStan and a compatible C++ toolchain by following the official
+[CmdStanPy installation instructions](https://mc-stan.org/cmdstanpy/installation.html).
+
+### Install from source
+
+BDGDM is currently installed directly from its source repository:
+
+```bash
+git clone https://github.com/caravagnalab/DECONVEILp.git
+cd DECONVEILp
+python -m pip install -e .
+
 ```
+
+## Analysis workflows
 
 ```{toctree}
 :maxdepth: 2
-:hidden:
-:caption: Tutorials
+:caption: Vignettes
 
-quickstart.ipynb
-single_group.ipynb
-subtype_comparison.ipynb
-classification.ipynb
-simulation_validation.ipynb
-benchmarking.ipynb
+single_group
+subtype_comparison
+multigene_analysis
 ```
 
-```{toctree}
-:maxdepth: 2
-:hidden:
-:caption: Package information
+## Workflow overview
 
-model.md
-input_data.md
-interpretation.md
-changelog.md
-contributing.md
-api/index
-```
+### Single-group analysis
+
+The [single-group vignette](single_group.ipynb) demonstrates how to fit and interpret one gene in a single tumour type/subtype. It covers posterior
+parameters, CN-transition effects, diagnostics, posterior predictive checks, and dosage-response classification.
+
+### Subtype comparison
+
+The [subtype-comparison vignette](subtype_comparison.ipynb) demonstrates how to jointly estimate gene-dosage responses across tumour subtypes. It covers subtype-specific parameters, direct scaling and deviation contrasts, classification, and dosage-response rewiring.
+
+### Multigene analysis
+
+The [multigene-analysis vignette](multigene_analysis.ipynb) extends the workflow to a set of informative genes. It covers gene selection, batch
+fitting, diagnostic filtering, response-class summaries, transition patterns, rewiring, and result export.

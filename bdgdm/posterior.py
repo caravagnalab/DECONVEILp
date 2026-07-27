@@ -824,3 +824,364 @@ def get_posterior_summary_single(summary):
     )
 
     return metadata, parameters, transitions
+
+
+def get_posterior_summary_subtype(summary):
+    """
+    Convert a flat BDGDM subtype-comparison posterior summary into
+    tidy tables.
+
+    Parameters
+    ----------
+    summary : dict
+        Output of the BDGDM posterior summarization step for a
+        subtype-comparison fit.
+
+    Returns
+    -------
+    metadata : pandas.DataFrame
+        Analysis metadata and subtype order.
+
+    parameters : pandas.DataFrame
+        Shared and subtype-specific posterior parameter summaries.
+
+    transitions : pandas.DataFrame
+        Subtype-specific CN-transition posterior summaries.
+
+    contrasts : pandas.DataFrame
+        Direct posterior contrasts between subtypes, including baseline
+        expression, dosage scaling, and deviation contrasts when available.
+    """
+    analysis_mode = summary.get(
+        "analysis_mode",
+        "subtype_comparison",
+    )
+
+    subtype_levels = list(
+        summary.get("subtype_levels", [])
+        or []
+    )
+
+    n_subtypes = int(
+        summary.get(
+            "n_subtypes",
+            len(subtype_levels),
+        )
+    )
+
+    if n_subtypes < 2:
+        raise ValueError(
+            "get_posterior_summary_subtype() requires a posterior "
+            "summary containing at least two subtypes."
+        )
+
+    subtype_labels = {}
+
+    for subtype_index in range(
+        1,
+        n_subtypes + 1,
+    ):
+        fallback_label = (
+            subtype_levels[subtype_index - 1]
+            if subtype_index <= len(subtype_levels)
+            else f"s{subtype_index}"
+        )
+
+        subtype_labels[subtype_index] = summary.get(
+            f"subtype_label_s{subtype_index}",
+            fallback_label,
+        )
+
+    metadata = pd.DataFrame(
+        [
+            {
+                "gene": summary.get("gene"),
+                "analysis_mode": analysis_mode,
+                "engine": summary.get("engine"),
+                "n_subtypes": n_subtypes,
+                "subtype_levels": subtype_levels,
+                "subtype_levels_str": "|".join(
+                    subtype_labels.values()
+                ),
+                "subtype_1": subtype_labels.get(1),
+                "subtype_2": subtype_labels.get(2),
+            }
+        ]
+    )
+
+    # Shared and subtype-specific parameters
+    
+    parameter_rows = []
+
+    shared_parameter_definitions = [
+        ("b_noncancer_log", "b_noncancer_log"),
+        ("phi", "phi"),
+    ]
+
+    for parameter, prefix in shared_parameter_definitions:
+        parameter_rows.append(
+            {
+                "parameter": parameter,
+                "parameter_scope": "shared",
+                "subtype_index": None,
+                "subtype": None,
+                "median": summary.get(
+                    f"{prefix}_median"
+                ),
+                "q025": summary.get(
+                    f"{prefix}_q025"
+                ),
+                "q975": summary.get(
+                    f"{prefix}_q975"
+                ),
+                "p_rope": None,
+            }
+        )
+
+    subtype_parameter_definitions = [
+        ("b0", "b0"),
+        ("b_scaling", "b_scaling"),
+        ("b_deviation", "b_deviation"),
+    ]
+
+    for subtype_index, subtype_label in subtype_labels.items():
+        for parameter, prefix in subtype_parameter_definitions:
+            key_prefix = (
+                f"{prefix}_s{subtype_index}"
+            )
+
+            parameter_rows.append(
+                {
+                    "parameter": parameter,
+                    "parameter_scope": "subtype",
+                    "subtype_index": subtype_index,
+                    "subtype": subtype_label,
+                    "median": summary.get(
+                        f"{key_prefix}_median"
+                    ),
+                    "q025": summary.get(
+                        f"{key_prefix}_q025"
+                    ),
+                    "q975": summary.get(
+                        f"{key_prefix}_q975"
+                    ),
+                    "p_rope": (
+                        summary.get(
+                            f"p_rope_bdev_s{subtype_index}"
+                        )
+                        if parameter == "b_deviation"
+                        else None
+                    ),
+                }
+            )
+
+    parameters = pd.DataFrame(
+        parameter_rows
+    )
+
+    # Subtype-specific CN transitions
+   
+    transition_rows = []
+
+    for subtype_index, subtype_label in subtype_labels.items():
+        for transition in (
+            "2to1",
+            "2to3",
+            "2to4",
+        ):
+            transition_rows.append(
+                {
+                    "subtype_index": subtype_index,
+                    "subtype": subtype_label,
+                    "transition": transition.replace(
+                        "to",
+                        "→",
+                    ),
+                    "transition_key": transition,
+                    "lp_median": summary.get(
+                        f"lp_{transition}_s"
+                        f"{subtype_index}_median"
+                    ),
+                    "lp_q025": summary.get(
+                        f"lp_{transition}_s"
+                        f"{subtype_index}_q025"
+                    ),
+                    "lp_q975": summary.get(
+                        f"lp_{transition}_s"
+                        f"{subtype_index}_q975"
+                    ),
+                    "fractional_change_median": (
+                        summary.get(
+                            f"fracCN_{transition}_s"
+                            f"{subtype_index}_median"
+                        )
+                    ),
+                    "fractional_change_q025": (
+                        summary.get(
+                            f"fracCN_{transition}_s"
+                            f"{subtype_index}_q025"
+                        )
+                    ),
+                    "fractional_change_q975": (
+                        summary.get(
+                            f"fracCN_{transition}_s"
+                            f"{subtype_index}_q975"
+                        )
+                    ),
+                    "p_positive": summary.get(
+                        f"p_fracCN_{transition}_pos_s"
+                        f"{subtype_index}"
+                    ),
+                    "p_negative": summary.get(
+                        f"p_fracCN_{transition}_neg_s"
+                        f"{subtype_index}"
+                    ),
+                    "p_rope": summary.get(
+                        f"p_rope_fracCN_{transition}_s"
+                        f"{subtype_index}"
+                    ),
+                    "ppd": summary.get(
+                        f"ppd_fracCN_{transition}_s"
+                        f"{subtype_index}"
+                    ),
+                    "scaling_component_median": (
+                        summary.get(
+                            f"lp_scaling_{transition}_s"
+                            f"{subtype_index}_median"
+                        )
+                    ),
+                    "scaling_component_q025": (
+                        summary.get(
+                            f"lp_scaling_{transition}_s"
+                            f"{subtype_index}_q025"
+                        )
+                    ),
+                    "scaling_component_q975": (
+                        summary.get(
+                            f"lp_scaling_{transition}_s"
+                            f"{subtype_index}_q975"
+                        )
+                    ),
+                    "deviation_component_median": (
+                        summary.get(
+                            f"lp_dev_{transition}_s"
+                            f"{subtype_index}_median"
+                        )
+                    ),
+                    "deviation_component_q025": (
+                        summary.get(
+                            f"lp_dev_{transition}_s"
+                            f"{subtype_index}_q025"
+                        )
+                    ),
+                    "deviation_component_q975": (
+                        summary.get(
+                            f"lp_dev_{transition}_s"
+                            f"{subtype_index}_q975"
+                        )
+                    ),
+                    "cancellation_index_median": (
+                        summary.get(
+                            f"cancel_index_{transition}_s"
+                            f"{subtype_index}_median"
+                        )
+                    ),
+                    "cancellation_index_q025": (
+                        summary.get(
+                            f"cancel_index_{transition}_s"
+                            f"{subtype_index}_q025"
+                        )
+                    ),
+                    "cancellation_index_q975": (
+                        summary.get(
+                            f"cancel_index_{transition}_s"
+                            f"{subtype_index}_q975"
+                        )
+                    ),
+                }
+            )
+
+    transitions = pd.DataFrame(
+        transition_rows
+    )
+
+    # Direct subtype contrasts
+
+    contrast_definitions = [
+        {
+            "contrast": "baseline_expression",
+            "prefix": "tumor0_lfc",
+            "ppd_key": "ppd_tumor",
+            "p_rope_key": "p_rope_tumor",
+        },
+        {
+            "contrast": "dosage_scaling",
+            "prefix": "delta_scaling",
+            "ppd_key": "ppd_scaling",
+            "p_rope_key": "p_rope_scaling",
+        },
+        {
+            "contrast": "deviation",
+            "prefix": "delta_dev",
+            "ppd_key": "ppd_dev",
+            "p_rope_key": "p_rope_dev",
+        },
+    ]
+
+    contrast_rows = []
+
+    for definition in contrast_definitions:
+        prefix = definition["prefix"]
+
+        row = {
+            "contrast": definition["contrast"],
+            "contrast_prefix": prefix,
+            "subtype_1": subtype_labels.get(1),
+            "subtype_2": subtype_labels.get(2),
+            "median": summary.get(
+                f"{prefix}_median"
+            ),
+            "q025": summary.get(
+                f"{prefix}_q025"
+            ),
+            "q975": summary.get(
+                f"{prefix}_q975"
+            ),
+            "ppd": summary.get(
+                definition["ppd_key"]
+            ),
+            "p_rope": summary.get(
+                definition["p_rope_key"]
+            ),
+        }
+
+        contrast_rows.append(row)
+
+    contrasts = pd.DataFrame(
+        contrast_rows
+    )
+
+    # Remove contrasts not produced by the current model or summarizer.
+    evidence_columns = [
+        "median",
+        "q025",
+        "q975",
+        "ppd",
+        "p_rope",
+    ]
+
+    contrasts = (
+        contrasts.loc[
+            contrasts[evidence_columns]
+            .notna()
+            .any(axis=1)
+        ]
+        .reset_index(drop=True)
+    )
+
+    return (
+        metadata,
+        parameters,
+        transitions,
+        contrasts,
+    )

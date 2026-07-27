@@ -1,17 +1,31 @@
 # Configuration file for the Sphinx documentation builder.
 
-from importlib.metadata import PackageNotFoundError, version
+from importlib.metadata import (
+    PackageNotFoundError,
+    version as package_version,
+)
 from pathlib import Path
 
 
+# ---------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------
+
+DOCS_DIR = Path(__file__).resolve().parent
+ROOT_DIR = DOCS_DIR.parent
+PACKAGE_DIR = ROOT_DIR / "bdgdm"
+
+
+# ---------------------------------------------------------------------
 # Project information
+# ---------------------------------------------------------------------
 
 project = "BDGDM"
 author = "Katsiaryna Davydzenka"
 copyright = "2026, Katsiaryna Davydzenka"
 
 try:
-    release = version("bdgdm")
+    release = package_version("bdgdm")
 except PackageNotFoundError:
     # Useful when the documentation is inspected before the package
     # has been installed in the current environment.
@@ -19,8 +33,13 @@ except PackageNotFoundError:
 
 version = release
 
+# The default is already "index", but making it explicit improves clarity.
+root_doc = "index"
 
+
+# ---------------------------------------------------------------------
 # General configuration
+# ---------------------------------------------------------------------
 
 extensions = [
     "myst_nb",
@@ -30,38 +49,60 @@ extensions = [
     "sphinx.ext.viewcode",
 ]
 
-# AutoAPI
 
-# Use this when the repository contains:
+# ---------------------------------------------------------------------
+# AutoAPI
+# ---------------------------------------------------------------------
+
+autoapi_type = "python"
+
+# Expected repository layout:
 #
-# BDGDM/
+# DECONVEILp/
 # ├── bdgdm/
 # └── docs/
 #
-autoapi_type = "python"
-autoapi_dirs = ["../bdgdm"]
+autoapi_dirs = [
+    str(PACKAGE_DIR),
+]
 
+# Generated API pages are placed under docs/api/.
 autoapi_root = "api"
 
+# Automatically add the generated API index to the documentation tree.
+autoapi_add_toctree_entry = True
+
+# Show documented public members without displaying private or
+# double-underscore implementation details.
 autoapi_options = [
     "members",
     "show-inheritance",
     "show-module-summary",
-    "special-members",
 ]
 
-# Avoid documenting private implementation objects by default.
 autoapi_member_order = "bysource"
+
+# Include both class-level and __init__ documentation when available.
+autoapi_python_class_content = "both"
+
+# Retain generated API source files during local development.
 autoapi_keep_files = True
 
-# Optional exclusions.
 autoapi_ignore = [
+    "*migrations*",
     "*/__pycache__/*",
     "*/tests/*",
+    "*/.ipynb_checkpoints/*",
+    "**/.ipynb_checkpoints/**",
+    "*-checkpoint.py",
+    "*_old.py",
+    "*_old_ver.py",
 ]
 
 
+# ---------------------------------------------------------------------
 # NumPy-style docstrings
+# ---------------------------------------------------------------------
 
 napoleon_numpy_docstring = True
 napoleon_google_docstring = False
@@ -70,7 +111,10 @@ napoleon_include_init_with_doc = True
 napoleon_include_private_with_doc = False
 napoleon_include_special_with_doc = False
 
+
+# ---------------------------------------------------------------------
 # MyST and notebook configuration
+# ---------------------------------------------------------------------
 
 myst_enable_extensions = [
     "amsmath",
@@ -79,33 +123,48 @@ myst_enable_extensions = [
     "deflist",
 ]
 
-# Use outputs already stored in the notebooks.
+# Render outputs already saved in the notebooks.
 #
-# This is appropriate for BDGDM because CmdStan compilation and NUTS
-# sampling may take too long for a Read the Docs build.
+# CmdStan compilation and NUTS sampling are intentionally not performed
+# during Sphinx or Read the Docs builds.
 nb_execution_mode = "off"
 
-# Remove notebook input/output prompts such as In [1] and Out [1].
+# Retain code cells and their saved outputs.
 nb_remove_code_source = False
 nb_remove_code_outputs = False
 
-# Raise an error when a notebook contains a stored error output.
-nb_execution_raise_on_error = True
+# Make long tables and text outputs vertically scrollable.
+nb_scroll_outputs = True
 
+# Keep stderr visible by default. Individual CmdStan fitting cells can
+# receive the "remove-stderr" tag to suppress routine sampling logs.
+nb_output_stderr = "show"
+
+
+# ---------------------------------------------------------------------
 # Files ignored by Sphinx
+# ---------------------------------------------------------------------
 
 exclude_patterns = [
     "_build",
+    "api",
     "Thumbs.db",
     ".DS_Store",
     "**/.ipynb_checkpoints",
 ]
 
 
+# ---------------------------------------------------------------------
 # HTML output
+# ---------------------------------------------------------------------
 
 html_theme = "sphinx_rtd_theme"
-html_title = "BDGDM documentation"
+
+html_title = (
+    f"BDGDM {release} documentation"
+    if release != "development"
+    else "BDGDM documentation"
+)
 
 html_theme_options = {
     "navigation_depth": 4,
@@ -115,7 +174,7 @@ html_theme_options = {
     "titles_only": False,
 }
 
-# Uncomment after creating docs/_static/.
+# Enable these after creating docs/_static/custom.css.
+#
 # html_static_path = ["_static"]
-
-
+# html_css_files = ["custom.css"]
