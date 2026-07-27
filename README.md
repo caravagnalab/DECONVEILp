@@ -1,32 +1,49 @@
-# DECONVEILp
-BDGDM is a Bayesian framework that quantify copy-number-dependent transcriptional signal from bulk RNA-seq and WGS.
+# BDGDM
 
-### Features
-
-- Bayesian inference of copy-number–expression relationships.
-- Single-tumour and subtype-specific dosage-response analysis.
-- Dosage-response classification (dosage-sensitive, dosage-compensated, HYPER, Mixed, dosage-insensitive, Uncertain).
-- Explicit tumour purity correction.
+**BDGDM — Bayesian Differential Gene Dosage Model** is a Bayesian framework for quantifying copy-number-dependent transcriptional responses from bulk
+RNA-seq data using tumour purity and gene-level absolute copy-number estimates.
 
 
-### Key advantages
+The package supports:
 
-- Supports **tumour-only** transcriptomic datasets without requiring matched normal samples.
-- Quantifies **uncertainty** through posterior distributions and credible intervals.
-- Detects **subtype-specific dosage rewiring** by comparing CN-expression relationships across tumour subtypes.
+- tumour-only transcriptomic datasets without requiring matched normal samples; 
+- single-group and subtype-comparison dosage-response analysis;
+- posterior classification of dosage responses as dosage-sensitive (`DSG`), dosage-compensated (`DCG`), hyper-responsive (`HYPER`), mixed (`Mixed`),
+  dosage-insensitive (`DIG`), or uncertain (`UNC`);
+- direct Bayesian assessment of subtype-specific dosage-response rewiring.
 
-  
-### Installation
+## Installation
 
-BDGDM requires Python 3.10 or later and uses CmdStanPy as its interface to Stan.
-Install the current development version:
-- clone or download the repository, then open a terminal in the project root—the directory containing `pyproject.toml`:
-  `cd DECONVEILp`
-- install the package:
-  `python -m pip install .`
+BDGDM requires Python 3.10 or later and uses [CmdStanPy](https://mc-stan.org/cmdstanpy/) for Bayesian inference.
+Before fitting BDGDM models, install CmdStan and a compatible C++ toolchain by following the official
+[CmdStanPy installation instructions](https://mc-stan.org/cmdstanpy/installation.html).
 
-**Install CmdStan**
-`python -c "import cmdstanpy; cmdstanpy.install_cmdstan()"`
+### Install from source
+
+BDGDM is currently installed directly from its source repository:
+
+```bash
+git clone https://github.com/caravagnalab/DECONVEILp.git
+cd DECONVEILp
+python -m pip install -e .
+
+```
+
+## Workflow overview
+
+### Single-group analysis
+
+The [single-group vignette](single_group.ipynb) demonstrates how to fit and interpret one gene in a single tumour type/subtype. It covers posterior
+parameters, CN-transition effects, diagnostics, posterior predictive checks, and dosage-response classification.
+
+### Subtype comparison
+
+The [subtype-comparison vignette](subtype_comparison.ipynb) demonstrates how to jointly estimate gene-dosage responses across tumour subtypes. It covers subtype-specific parameters, direct scaling and deviation contrasts, classification, and dosage-response rewiring.
+
+### Multigene analysis
+
+The [multigene-analysis vignette](multigene_analysis.ipynb) extends the workflow to a set of informative genes. It covers gene selection, batch
+fitting, diagnostic filtering, response-class summaries, transition patterns, rewiring, and result export.
 
 
 ### Copyright and contacts
