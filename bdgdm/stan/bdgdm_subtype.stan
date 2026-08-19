@@ -135,10 +135,14 @@ generated quantities {
   vector[S] tumor_fc_2to4;
   vector[S] fracCN_2to4;
 
+  vector[S] tumor_fc_2to5;
+  vector[S] fracCN_2to5;
+
   // Net log fold-changes (numerically stable)
   vector[S] lp_2to1;  // log(tumor_fc_2to1)
   vector[S] lp_2to3;  // log(tumor_fc_2to3)
   vector[S] lp_2to4;  // log(tumor_fc_2to4)
+  vector[S] lp_2to5;  // log(tumor_fc_2to5)
 
   // Mechanistic decomposition into scaling-only and deviation-only pieces
   // lp_net = lp_scaling + lp_dev
@@ -151,11 +155,15 @@ generated quantities {
   vector[S] lp_scaling_2to4;
   vector[S] lp_dev_2to4;
 
+  vector[S] lp_scaling_2to5;
+  vector[S] lp_dev_2to5;
+
   // OPTIONAL: cancellation indices (signed), useful for interpretation
   // negative means deviation opposes scaling
   vector[S] cancel_index_2to1;
   vector[S] cancel_index_2to3;
   vector[S] cancel_index_2to4;
+  vector[S] cancel_index_2to5;
 
   vector[N] log_lik;
 
@@ -172,10 +180,10 @@ generated quantities {
   vector[N] mu_rep;
 
   for (s in 1:S) {
-    // -------------------------
+    // --------------------------------------------
     // CN 2 -> 1 (single-copy loss)
     // dose_log = log(1/2), dev = -0.5
-    // -------------------------
+    // --------------------------------------------
     lp_scaling_2to1[s] = log(1.0 / 2.0) * b_scaling[s];
     lp_dev_2to1[s]     = -0.5 * b_deviation[s];
     lp_2to1[s]         = lp_scaling_2to1[s] + lp_dev_2to1[s];
@@ -186,10 +194,10 @@ generated quantities {
     cancel_index_2to1[s] =
       lp_dev_2to1[s] / fmax(abs(lp_scaling_2to1[s]), 1e-12);
 
-    // -------------------------
+    // -------------------------------------------
     // CN 2 -> 3 (single-copy gain)
     // dose_log = log(3/2), dev = +0.5
-    // -------------------------
+    // -------------------------------------------
     lp_scaling_2to3[s] = log(3.0 / 2.0) * b_scaling[s];
     lp_dev_2to3[s]     = 0.5 * b_deviation[s];
     lp_2to3[s]         = lp_scaling_2to3[s] + lp_dev_2to3[s];
@@ -200,10 +208,10 @@ generated quantities {
     cancel_index_2to3[s] =
       lp_dev_2to3[s] / fmax(abs(lp_scaling_2to3[s]), 1e-12);
 
-    // -------------------------
+    // ---------------------------------------------
     // CN 2 -> 4 (amplification)
     // dose_log = log(4/2), dev = +1.0
-    // -------------------------
+    // ---------------------------------------------
     lp_scaling_2to4[s] = log(4.0 / 2.0) * b_scaling[s];
     lp_dev_2to4[s]     = 1.0 * b_deviation[s];
     lp_2to4[s]         = lp_scaling_2to4[s] + lp_dev_2to4[s];
@@ -213,6 +221,24 @@ generated quantities {
 
     cancel_index_2to4[s] =
       lp_dev_2to4[s] / fmax(abs(lp_scaling_2to4[s]), 1e-12);
+  
+
+    //---------------------------------------------
+    // CN 2 -> 5 (amplification); 
+    // dose_log = log(5 / 2); dev = +1.5
+    //---------------------------------------------
+  
+    lp_scaling_2to5[s] = log(5.0 / 2.0) * b_scaling[s];
+    lp_dev_2to5[s]     = 1.5 * b_deviation[s];
+    lp_2to5[s]         = lp_scaling_2to5[s] + lp_dev_2to5[s];
+
+    tumor_fc_2to5[s] = exp(lp_2to5[s]);
+    fracCN_2to5[s]   = tumor_fc_2to5[s] - 1.0;
+
+    cancel_index_2to5[s] =
+      lp_dev_2to5[s] / fmax(abs(lp_scaling_2to5[s]), 1e-12);
+
+    
   }
 
   for (n in 1:N) {

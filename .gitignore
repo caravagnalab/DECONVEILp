@@ -14,3 +14,10 @@ __pycache__/
 docs/_build/
 docs/api/
 docs/.jupyter_cache/
+
+bdgdm/classify_old.py
+bdgdm/classify_v1.py
+bdgdm/classify_v2.py
+bdgdm/preprocessing_old.py
+
+notebooks/tcga_analysis.ipynb

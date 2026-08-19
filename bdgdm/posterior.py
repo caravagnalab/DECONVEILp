@@ -291,6 +291,7 @@ def extract_posterior_draws(
         "lp_2to1",
         "lp_2to3",
         "lp_2to4",
+        "lp_2to5"
     ]
 
     optional_indexed = [
@@ -300,9 +301,12 @@ def extract_posterior_draws(
         "lp_dev_2to3",
         "lp_scaling_2to4",
         "lp_dev_2to4",
+        "lp_scaling_2to5",
+        "lp_dev_2to5",
         "cancel_index_2to1",
         "cancel_index_2to3",
         "cancel_index_2to4",
+        "cancel_index_2to5"
     ]
 
     draws: dict[str, np.ndarray | None] = {}
@@ -635,9 +639,12 @@ def summarize_posterior(
         "lp_dev_2to3",
         "lp_scaling_2to4",
         "lp_dev_2to4",
+        "lp_scaling_2to5",
+        "lp_dev_2to5",
         "cancel_index_2to1",
         "cancel_index_2to3",
         "cancel_index_2to4",
+        "cancel_index_2to5",
     ]
 
     for subtype_index in subtype_indices:
@@ -666,7 +673,7 @@ def summarize_posterior(
             rope_b_deviation,
         )
 
-        for transition in ["2to1", "2to3", "2to4"]:
+        for transition in ["2to1", "2to3", "2to4", "2to5"]:
             _summarize_transition(
                 output,
                 draws[f"lp_{transition}"][
@@ -769,6 +776,7 @@ def get_posterior_summary_single(summary):
         "2to1",
         "2to3",
         "2to4",
+        "2to5",
     ):
         transition_rows.append(
             {
@@ -988,6 +996,7 @@ def get_posterior_summary_subtype(summary):
             "2to1",
             "2to3",
             "2to4",
+            "2to5",
         ):
             transition_rows.append(
                 {

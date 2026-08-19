@@ -101,11 +101,21 @@ generated quantities {
   real fracCN_2to4;
   real cancel_index_2to4;
 
+  // CN 2 -> 5
+  real lp_scaling_2to5;
+  real lp_dev_2to5;
+  real lp_2to5;
+  real tumor_fc_2to5;
+  real fracCN_2to5;
+  real cancel_index_2to5;
+
   vector[N] log_lik;
   vector[N] mu_rep;
   array[N] int y_rep;
 
+  //---------------------------------------------
   // CN 2 -> 1: dose_log = log(1 / 2), dev = -0.5
+  //---------------------------------------------
   lp_scaling_2to1 = log(1.0 / 2.0) * b_scaling;
   lp_dev_2to1 = -0.5 * b_deviation;
   lp_2to1 = lp_scaling_2to1 + lp_dev_2to1;
@@ -117,7 +127,9 @@ generated quantities {
     lp_dev_2to1
     / fmax(abs(lp_scaling_2to1), 1e-12);
 
+  //---------------------------------------------
   // CN 2 -> 3: dose_log = log(3 / 2), dev = +0.5
+  //---------------------------------------------
   lp_scaling_2to3 = log(3.0 / 2.0) * b_scaling;
   lp_dev_2to3 = 0.5 * b_deviation;
   lp_2to3 = lp_scaling_2to3 + lp_dev_2to3;
@@ -141,7 +153,19 @@ generated quantities {
     lp_dev_2to4
     / fmax(abs(lp_scaling_2to4), 1e-12);
 
-  for (n in 1:N) {
+  //---------------------------------------------
+  // CN 2 -> 5; dose_log = log(5 / 2); dev = +1.5
+  //---------------------------------------------
+  
+  lp_scaling_2to5 = log(5.0 / 2.0) * b_scaling;
+  lp_dev_2to5 = 1.5 * b_deviation;
+  lp_2to5 = lp_scaling_2to5 + lp_dev_2to5;
+  tumor_fc_2to5 = exp(lp_2to5);
+  fracCN_2to5 = tumor_fc_2to5 - 1.0;
+  cancel_index_2to5 = lp_dev_2to5 / fmax(abs(lp_scaling_2to5), 1e-12);
+
+
+for (n in 1:N) {
     real log_mu_safe = fmin(log_mu[n], 20.0);
 
     log_lik[n] =

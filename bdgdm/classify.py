@@ -10,7 +10,7 @@ import pandas as pd
 
 
 """
-Posterior classification utilities for BDGDM.
+Posterior classification for BDGDM.
 
 This module converts posterior summaries produced by ``summarize_posterior``into interpretable gene-dosage classes:
 
@@ -21,8 +21,18 @@ This module converts posterior summaries produced by ``summarize_posterior``into
 - DIG: dosage-insensitive response
 - UNC: uncertain response
 
-The module supports both a fitted ``BDGDMFit`` object and flat summary
-dictionaries/data frames.
+The module supports both a fitted ``BDGDMFit`` object and flat summary dictionaries/data frames.
+
+- Failed or non-converged fits are not assigned DSG/DCG/DIG/HYPER/Mixed/UNC.
+  They remain in tabular outputs with ``classification_eligible=False`` and a missing response-class value, so they can be audited without entering
+  biological class proportions.
+- Transition directional support requires an available PPD together with the expected/reverse directional probability. When a transition ROPE
+  probability is available, it must also pass the practical-effect threshold.
+- Baseline differential-expression and subtype-rewiring calls require both PPD and ROPE evidence.
+- Transition-level biological calls can be gated by empirical CN-state support.
+  In strict mode, both CN=2 and the target CN state must meet their sample-count
+  thresholds; unsupported transitions remain available as model predictions but
+  cannot create DSG/DCG/HYPER/Mixed/DIG calls.
 """
 
 __all__ = [
@@ -61,23 +71,16 @@ class ClassificationThresholds:
     # Evidence that the deviation coefficient is practically small.
     dev_small_prob: float = 0.75
 
-    # Transition-response thresholds relative to the canonical
-    # proportional log-response.
-    #
+    # Transition-response thresholds relative to the canonical proportional log-response.
     # response_ratio = observed_log_effect / canonical_log_effect
+    # cancel_threshold=0.50: response_ratio < 0.50 is buffered.
+    # overcomp_threshold=1.00: response_ratio < 0 indicates sign reversal/overcompensation.
+    # hyper_threshold=0.30: response_ratio > 1.30 is hyper-responsive.
     #
-    # cancel_threshold=0.20:
-    #     response_ratio < 0.80 is buffered.
-    # overcomp_threshold=1.00:
-    #     response_ratio < 0 indicates sign reversal/overcompensation.
-    # hyper_threshold=0.50:
-    #     response_ratio > 1.50 is hyper-responsive.
-    #
-    # The stored cancellation index is retained as a descriptive output,
-    # but it no longer defines HYPER.
-    cancel_threshold: float = 0.20
+    # The stored cancellation index is retained as a descriptive output, but it no longer defines HYPER.
+    cancel_threshold: float = 0.50
     overcomp_threshold: float = 1.00
-    hyper_threshold: float = 0.50
+    hyper_threshold: float = 0.30
 
     # Numerical stability.
     min_scaling_abs: float = 1e-3
@@ -93,8 +96,17 @@ class ClassificationThresholds:
     frac_small_gain: float = 0.15
     frac_small_amp: float = 0.25
 
-    # Low-CN support flag.
+    # Overall low-CN support flag retained for UNC-lowCN.
     low_cn_aneup_threshold: int = 10
+
+    # Transition-specific empirical CN support.  A CN transition is allowed
+    # to determine DSG/DCG/HYPER/Mixed/DIG only when both the diploid
+    # reference state (CN=2) and the target state are sufficiently represented.
+    # Expected result keys are, for example, n_cn2_s1 and n_cn3_s1 (with
+    # global n_cn2/n_cn3 accepted as a single-group fallback).
+    min_reference_cn2_support: int = 10
+    min_transition_cn_support: int = 10
+    require_empirical_transition_support: bool = True
 
     # By default, a large median cannot replace weak posterior support.
     allow_median_support_fallback: bool = False
@@ -136,6 +148,12 @@ class ClassificationThresholds:
 
         if self.low_cn_aneup_threshold < 0:
             raise ValueError("low_cn_aneup_threshold cannot be negative.")
+
+        if self.min_reference_cn2_support < 0:
+            raise ValueError("min_reference_cn2_support cannot be negative.")
+
+        if self.min_transition_cn_support < 0:
+            raise ValueError("min_transition_cn_support cannot be negative.")
 
 
 # Backward-compatible name used by the original script.
@@ -246,22 +264,18 @@ def _effect_supported(
     rope_value: Any,
     thresholds: ClassificationThresholds,
 ) -> tuple[bool, str]:
-    """Evaluate contrast support and record the evidence source."""
+    """Evaluate subtype-contrast support using both PPD and ROPE."""
     ppd_available = _is_finite_number(ppd_value)
     rope_available = _is_finite_number(rope_value)
 
-    if ppd_available and rope_available:
-        supported = (
-            float(ppd_value) >= thresholds.ppd_sig
-            and float(rope_value) <= thresholds.rope_low
-        )
-        return supported, "ppd_and_rope"
+    if not ppd_available or not rope_available:
+        return False, "incomplete_ppd_rope"
 
-    if ppd_available:
-        supported = float(ppd_value) >= thresholds.ppd_sig
-        return supported, "ppd_only"
-
-    return False, "unavailable"
+    supported = (
+        float(ppd_value) >= thresholds.ppd_sig
+        and float(rope_value) <= thresholds.rope_low
+    )
+    return supported, "ppd_and_rope"
 
 
 def _effect_null(
@@ -318,11 +332,12 @@ def _canonical_log_effect(transition: str) -> float:
         "2to1": float(np.log(1.0 / 2.0)),
         "2to3": float(np.log(3.0 / 2.0)),
         "2to4": float(np.log(4.0 / 2.0)),
+        "2to5": float(np.log(5.0 / 2.0)),
     }
 
     if transition not in canonical:
         raise ValueError(
-            "transition must be one of '2to1', '2to3', or '2to4'."
+            "transition must be one of '2to1', '2to3', '2to4' or '2to5'."
         )
 
     return canonical[transition]
@@ -382,8 +397,8 @@ def _hyper_supported(
     """
     Test whether the complete credible interval is stronger than proportional.
 
-    ``hyper_threshold=0.50`` means that the log-response must be more than
-    1.5 times the canonical proportional log-response.
+    ``hyper_threshold=0.30`` means that the log-response must be more than
+    1.3 times the canonical proportional log-response.
     """
     canonical = _canonical_log_effect(transition)
     boundary = canonical * (1.0 + thresholds.hyper_threshold)
@@ -445,12 +460,16 @@ def _transition_support(
         ):
             return False
 
+        # PPD is mandatory for a supported biological direction.
         if (
-            _is_finite_number(ppd_value)
-            and float(ppd_value) < thresholds.ppd_sig
+            not _is_finite_number(ppd_value)
+            or float(ppd_value) < thresholds.ppd_sig
         ):
             return False
 
+        # When ROPE is available it must satisfy the practical-effect rule.
+        # If ROPE is unavailable, retain the documented PPD + directional
+        # probability fallback for legacy/saved posterior summaries.
         if (
             _is_finite_number(rope_probability)
             and float(rope_probability) > thresholds.rope_low
@@ -485,6 +504,9 @@ def _transition_support(
             expected_supported = median > thresholds.frac_small_gain
             reverse_supported = median < -thresholds.frac_small_gain
         elif transition == "2to4":
+            expected_supported = median > thresholds.frac_small_amp
+            reverse_supported = median < -thresholds.frac_small_amp
+        elif transition == "2to5":
             expected_supported = median > thresholds.frac_small_amp
             reverse_supported = median < -thresholds.frac_small_amp
         else:
@@ -689,14 +711,200 @@ def interpret_rewiring(
     }
 
 
+_TRANSITION_TARGET_CN: dict[str, int] = {
+    "2to1": 1,
+    "2to3": 3,
+    "2to4": 4,
+    "2to5": 5,
+}
+
+
+def _empirical_cn_count(
+    result: Mapping[str, Any],
+    subtype_index: int,
+    cn_state: int,
+) -> float:
+    """Read an empirical sample count for one absolute-CN state.
+
+    The preferred keys are ``n_cn{state}_s{subtype}`` for subtype analyses and
+    ``n_cn{state}`` for a single group.  A few harmless naming variants and
+    nested count mappings are accepted to make saved results easier to reuse.
+
+    For continuous CN estimates, these counts should be created upstream from
+    prespecified CN-state bins; the classifier deliberately does not infer bins
+    from posterior summaries.
+    """
+    state = int(cn_state)
+    suffix = f"s{subtype_index}"
+
+    candidate_keys = [
+        f"n_cn{state}_{suffix}",
+        f"n_cn_{state}_{suffix}",
+        f"n_CN{state}_{suffix}",
+        f"n_cn{state}",
+        f"n_cn_{state}",
+        f"n_CN{state}",
+    ]
+
+    if state == 5:
+        candidate_keys.extend(
+            [
+                f"n_cn5plus_{suffix}",
+                f"n_cn5_plus_{suffix}",
+                "n_cn5plus",
+                "n_cn5_plus",
+            ]
+        )
+
+    for key in candidate_keys:
+        value = _get(result, key, np.nan)
+        if _is_finite_number(value):
+            return float(value)
+
+    mapping_keys = [
+        f"cn_state_counts_{suffix}",
+        f"cn_counts_{suffix}",
+        "cn_state_counts",
+        "cn_counts",
+    ]
+
+    for mapping_key in mapping_keys:
+        counts = _get(result, mapping_key, None)
+        if not isinstance(counts, Mapping):
+            continue
+
+        for state_key in (
+            state,
+            str(state),
+            f"CN{state}",
+            f"cn{state}",
+        ):
+            value = counts.get(state_key, np.nan)
+            if _is_finite_number(value):
+                return float(value)
+
+    return float("nan")
+
+
+def _transition_empirical_support(
+    result: Mapping[str, Any],
+    subtype_index: int,
+    transition: str,
+    thresholds: ClassificationThresholds,
+) -> dict[str, Any]:
+    """Evaluate whether a transition is empirically represented in the data.
+
+    A class-defining transition requires sufficient samples at both CN=2 and
+    the transition target state.  Posterior predictions are still retained for
+    unsupported states, but they are treated as model extrapolations and cannot
+    create DSG/DCG/HYPER/Mixed/DIG calls in strict empirical-support mode.
+    """
+    if transition not in _TRANSITION_TARGET_CN:
+        raise ValueError(f"Unknown CN transition {transition!r}.")
+
+    target_cn = _TRANSITION_TARGET_CN[transition]
+    reference_count = _empirical_cn_count(result, subtype_index, 2)
+    target_count = _empirical_cn_count(result, subtype_index, target_cn)
+
+    reference_available = _is_finite_number(reference_count)
+    target_available = _is_finite_number(target_count)
+    support_available = reference_available and target_available
+
+    empirical_supported: bool | None
+    if support_available:
+        empirical_supported = (
+            float(reference_count) >= thresholds.min_reference_cn2_support
+            and float(target_count) >= thresholds.min_transition_cn_support
+        )
+    else:
+        empirical_supported = None
+
+    if thresholds.require_empirical_transition_support:
+        classifiable = empirical_supported is True
+    else:
+        classifiable = True
+
+    if not thresholds.require_empirical_transition_support:
+        method = "empirical_support_not_required"
+    elif not support_available:
+        method = "empirical_cn_counts_unavailable"
+    elif empirical_supported:
+        method = "reference_and_target_cn_supported"
+    else:
+        ref_ok = (
+            reference_available
+            and float(reference_count) >= thresholds.min_reference_cn2_support
+        )
+        target_ok = (
+            target_available
+            and float(target_count) >= thresholds.min_transition_cn_support
+        )
+        if not ref_ok and not target_ok:
+            method = "insufficient_reference_and_target_cn_support"
+        elif not ref_ok:
+            method = "insufficient_reference_cn2_support"
+        else:
+            method = "insufficient_target_cn_support"
+
+    return {
+        "target_cn": target_cn,
+        "reference_count": reference_count,
+        "target_count": target_count,
+        "support_available": support_available,
+        "empirical_supported": empirical_supported,
+        "classifiable": classifiable,
+        "method": method,
+    }
+
+
+def _transition_evidence_scope(
+    classifiable_transitions: Sequence[str],
+) -> str:
+    """Describe which observed CN states support the final gene-level call."""
+    transitions = set(classifiable_transitions)
+
+    if not transitions:
+        return "none"
+
+    has_loss = "2to1" in transitions
+    has_gain = "2to3" in transitions
+    has_amp = bool(transitions.intersection({"2to4", "2to5"}))
+
+    if has_loss and has_gain and has_amp:
+        return "broad"
+    if has_loss and has_gain:
+        return "loss+gain"
+    if has_loss and has_amp:
+        return "loss+amplification"
+    if has_gain and has_amp:
+        return "gain+amplification"
+    if has_loss:
+        return "loss_only"
+    if has_gain:
+        return "gain_only"
+    return "amplification_only"
+
+
 def _summarize_transition_patterns(
     patterns: Sequence[str],
     *,
+    transitions: Sequence[str],
     fractional_medians: Sequence[Any],
+    classifiable: Sequence[bool],
     n_aneup: Any,
     thresholds: ClassificationThresholds,
-) -> tuple[str, str, str | None]:
-    """Convert transition-level patterns into one gene-level class."""
+) -> tuple[str, str, str | None, str, str | None]:
+    """Convert empirically supported transition patterns into one gene class.
+
+    Returns
+    -------
+    response_class, reason, subclass, evidence_scope, classification_basis
+
+    ``patterns`` may contain model predictions for empirically unsupported CN
+    states, but only entries marked ``classifiable=True`` participate in the
+    biological class.  This prevents extrapolated CN1/CN4/CN5 predictions from
+    creating Mixed or otherwise changing the gene class.
+    """
     group_map = {
         "proportional": "DSG",
         "buffered": "DCG",
@@ -704,9 +912,56 @@ def _summarize_transition_patterns(
         "hyperactive": "HYPER",
     }
 
+    eligible_records = [
+        (transition, pattern, fractional)
+        for transition, pattern, fractional, use_transition in zip(
+            transitions,
+            patterns,
+            fractional_medians,
+            classifiable,
+        )
+        if bool(use_transition)
+    ]
+
+    classifiable_transitions = [
+        transition for transition, _, _ in eligible_records
+    ]
+    evidence_scope = _transition_evidence_scope(classifiable_transitions)
+    classification_basis = (
+        "|".join(classifiable_transitions)
+        if classifiable_transitions
+        else None
+    )
+
+    # No locally supported target transition means that a global biological
+    # response class cannot be inferred, even if the parametric model can
+    # extrapolate effects to those states.
+    if not eligible_records:
+        low_cn = (
+            _is_finite_number(n_aneup)
+            and int(float(n_aneup)) < thresholds.low_cn_aneup_threshold
+        )
+
+        if low_cn:
+            return (
+                "UNC",
+                "insufficient_cn_variation",
+                "low_CN",
+                evidence_scope,
+                classification_basis,
+            )
+
+        return (
+            "UNC",
+            "insufficient_transition_specific_cn_support",
+            "limited_transition_support",
+            evidence_scope,
+            classification_basis,
+        )
+
     supported_groups = [
         group_map[pattern]
-        for pattern in patterns
+        for _, pattern, _ in eligible_records
         if pattern in group_map
     ]
     unique_supported = sorted(set(supported_groups))
@@ -717,48 +972,102 @@ def _summarize_transition_patterns(
     ):
         return (
             "Mixed",
-            "conflicting_supported_transition_patterns",
+            "conflicting_empirically_supported_transition_patterns",
             None,
+            evidence_scope,
+            classification_basis,
         )
 
     if len(unique_supported) == 1:
+        response_class = unique_supported[0]
         return (
-            unique_supported[0],
-            f"supported_{unique_supported[0].lower()}_pattern",
+            response_class,
+            f"supported_{response_class.lower()}_pattern",
             None,
+            evidence_scope,
+            classification_basis,
         )
 
-    if patterns and all(pattern == "null" for pattern in patterns):
-        return "DIG", "all_transitions_practically_null", None
+    eligible_patterns = [pattern for _, pattern, _ in eligible_records]
+    if eligible_patterns and all(pattern == "null" for pattern in eligible_patterns):
+        return (
+            "DIG",
+            "all_empirically_supported_transitions_practically_null",
+            None,
+            evidence_scope,
+            classification_basis,
+        )
 
-    small_thresholds = [
-        thresholds.frac_small_loss,
-        thresholds.frac_small_gain,
-        thresholds.frac_small_amp,
+    # Secondary DIG remains anchored to the original 2->1/2->3/2->4
+    # practical-effect thresholds.  CN5 is not assigned an arbitrary median
+    # threshold; a classifiable non-null CN5 transition therefore blocks this
+    # fallback and leaves the gene unresolved.
+    small_threshold_map = {
+        "2to1": thresholds.frac_small_loss,
+        "2to3": thresholds.frac_small_gain,
+        "2to4": thresholds.frac_small_amp,
+    }
+
+    dig_reference_records = [
+        (transition, pattern, fractional)
+        for transition, pattern, fractional in eligible_records
+        if transition in small_threshold_map
     ]
 
-    small_effects = all(
-        _is_finite_number(value)
-        and abs(float(value)) <= limit
-        for value, limit in zip(
-            fractional_medians,
-            small_thresholds,
-        )
+    small_effects = bool(dig_reference_records) and all(
+        _is_finite_number(fractional)
+        and abs(float(fractional)) <= small_threshold_map[transition]
+        for transition, _, fractional in dig_reference_records
     )
 
-    if not supported_groups and small_effects:
-        return "DIG", "all_transition_effects_small", "median_based"
+    cn5_blocks_secondary_dig = any(
+        transition == "2to5" and pattern != "null"
+        for transition, pattern, _ in eligible_records
+    )
+
+    if (
+        not supported_groups
+        and small_effects
+        and not cn5_blocks_secondary_dig
+    ):
+        return (
+            "DIG",
+            "empirically_supported_transition_effects_small",
+            "median_based",
+            evidence_scope,
+            classification_basis,
+        )
 
     low_cn = (
         _is_finite_number(n_aneup)
-        and int(float(n_aneup))
-        < thresholds.low_cn_aneup_threshold
+        and int(float(n_aneup)) < thresholds.low_cn_aneup_threshold
     )
 
     if low_cn:
-        return "UNC", "insufficient_cn_variation", "low_CN"
+        return (
+            "UNC",
+            "insufficient_cn_variation",
+            "low_CN",
+            evidence_scope,
+            classification_basis,
+        )
 
-    return "UNC", "insufficient_or_inconsistent_support", "ambiguous"
+    if len(eligible_records) < thresholds.min_supported_for_mixed:
+        return (
+            "UNC",
+            "limited_or_ambiguous_transition_support",
+            "limited_transition_support",
+            evidence_scope,
+            classification_basis,
+        )
+
+    return (
+        "UNC",
+        "insufficient_or_inconsistent_support",
+        "ambiguous",
+        evidence_scope,
+        classification_basis,
+    )
 
 
 def interpret_subtype_dosage(
@@ -767,142 +1076,65 @@ def interpret_subtype_dosage(
     subtype_levels: Sequence[str],
     thresholds: ClassificationThresholds,
 ) -> dict[str, Any]:
-    """Interpret CN-response patterns for one subtype."""
-    human_name = subtype_name(
-        subtype_index,
-        subtype_levels,
-    )
+    """Interpret CN-response patterns for one subtype.
+
+    Posterior effects are evaluated for CN 2->1/3/4/5, but only transitions
+    with sufficient empirical support at both CN=2 and the target CN state are
+    allowed to determine the final biological class when
+    ``require_empirical_transition_support=True``.
+    """
+    human_name = subtype_name(subtype_index, subtype_levels)
     safe_name = _safe_label(human_name)
     canonical_suffix = f"s{subtype_index}"
+    ordered_transitions = ["2to1", "2to3", "2to4", "2to5"]
 
-    transition_inputs = {
-        "2to1": {
+    transition_inputs: dict[str, dict[str, Any]] = {}
+    for transition in ordered_transitions:
+        expected_direction = "neg" if transition == "2to1" else "pos"
+        opposite_direction = "pos" if transition == "2to1" else "neg"
+
+        transition_inputs[transition] = {
             "ppd": _get(
                 result,
-                f"ppd_fracCN_2to1_s{subtype_index}",
+                f"ppd_fracCN_{transition}_s{subtype_index}",
                 np.nan,
             ),
             "expected_direction_probability": _get(
                 result,
-                f"p_fracCN_2to1_neg_s{subtype_index}",
+                f"p_fracCN_{transition}_{expected_direction}_s{subtype_index}",
                 np.nan,
             ),
             "opposite_direction_probability": _get(
                 result,
-                f"p_fracCN_2to1_pos_s{subtype_index}",
+                f"p_fracCN_{transition}_{opposite_direction}_s{subtype_index}",
                 np.nan,
             ),
             "rope_probability": _get(
                 result,
-                f"p_rope_fracCN_2to1_s{subtype_index}",
+                f"p_rope_fracCN_{transition}_s{subtype_index}",
                 np.nan,
             ),
             "fractional_median": _get(
                 result,
-                f"fracCN_2to1_s{subtype_index}_median",
+                f"fracCN_{transition}_s{subtype_index}_median",
                 np.nan,
             ),
             "lp_median": _get(
                 result,
-                f"lp_2to1_s{subtype_index}_median",
+                f"lp_{transition}_s{subtype_index}_median",
                 np.nan,
             ),
             "lp_q025": _get(
                 result,
-                f"lp_2to1_s{subtype_index}_q025",
+                f"lp_{transition}_s{subtype_index}_q025",
                 np.nan,
             ),
             "lp_q975": _get(
                 result,
-                f"lp_2to1_s{subtype_index}_q975",
+                f"lp_{transition}_s{subtype_index}_q975",
                 np.nan,
             ),
-        },
-        "2to3": {
-            "ppd": _get(
-                result,
-                f"ppd_fracCN_2to3_s{subtype_index}",
-                np.nan,
-            ),
-            "expected_direction_probability": _get(
-                result,
-                f"p_fracCN_2to3_pos_s{subtype_index}",
-                np.nan,
-            ),
-            "opposite_direction_probability": _get(
-                result,
-                f"p_fracCN_2to3_neg_s{subtype_index}",
-                np.nan,
-            ),
-            "rope_probability": _get(
-                result,
-                f"p_rope_fracCN_2to3_s{subtype_index}",
-                np.nan,
-            ),
-            "fractional_median": _get(
-                result,
-                f"fracCN_2to3_s{subtype_index}_median",
-                np.nan,
-            ),
-            "lp_median": _get(
-                result,
-                f"lp_2to3_s{subtype_index}_median",
-                np.nan,
-            ),
-            "lp_q025": _get(
-                result,
-                f"lp_2to3_s{subtype_index}_q025",
-                np.nan,
-            ),
-            "lp_q975": _get(
-                result,
-                f"lp_2to3_s{subtype_index}_q975",
-                np.nan,
-            ),
-        },
-        "2to4": {
-            "ppd": _get(
-                result,
-                f"ppd_fracCN_2to4_s{subtype_index}",
-                np.nan,
-            ),
-            "expected_direction_probability": _get(
-                result,
-                f"p_fracCN_2to4_pos_s{subtype_index}",
-                np.nan,
-            ),
-            "opposite_direction_probability": _get(
-                result,
-                f"p_fracCN_2to4_neg_s{subtype_index}",
-                np.nan,
-            ),
-            "rope_probability": _get(
-                result,
-                f"p_rope_fracCN_2to4_s{subtype_index}",
-                np.nan,
-            ),
-            "fractional_median": _get(
-                result,
-                f"fracCN_2to4_s{subtype_index}_median",
-                np.nan,
-            ),
-            "lp_median": _get(
-                result,
-                f"lp_2to4_s{subtype_index}_median",
-                np.nan,
-            ),
-            "lp_q025": _get(
-                result,
-                f"lp_2to4_s{subtype_index}_q025",
-                np.nan,
-            ),
-            "lp_q975": _get(
-                result,
-                f"lp_2to4_s{subtype_index}_q975",
-                np.nan,
-            ),
-        },
-    }
+        }
 
     b_scaling = _get(
         result,
@@ -922,14 +1154,12 @@ def interpret_subtype_dosage(
 
     if _is_finite_number(p_deviation_small):
         small_deviation = (
-            float(p_deviation_small)
-            >= thresholds.dev_small_prob
+            float(p_deviation_small) >= thresholds.dev_small_prob
         )
         small_deviation_method = "posterior_probability"
     elif _is_finite_number(b_deviation):
         small_deviation = (
-            abs(float(b_deviation))
-            <= thresholds.dev_abs_fallback
+            abs(float(b_deviation)) <= thresholds.dev_abs_fallback
         )
         small_deviation_method = "median_fallback"
     else:
@@ -943,7 +1173,7 @@ def interpret_subtype_dosage(
             expected_supported,
             reverse_supported,
             is_null,
-            support_method,
+            posterior_support_method,
         ) = _transition_support(
             transition=transition,
             ppd_value=inputs["ppd"],
@@ -960,24 +1190,18 @@ def interpret_subtype_dosage(
 
         lp_scaling = _get(
             result,
-            (
-                f"lp_scaling_{transition}_"
-                f"s{subtype_index}_median"
-            ),
+            f"lp_scaling_{transition}_s{subtype_index}_median",
             np.nan,
         )
-
         scaling_stable = (
             (
                 _is_finite_number(lp_scaling)
-                and abs(float(lp_scaling))
-                > thresholds.min_scaling_abs
+                and abs(float(lp_scaling)) > thresholds.min_scaling_abs
             )
             or (
                 not _is_finite_number(lp_scaling)
                 and _is_finite_number(b_scaling)
-                and abs(float(b_scaling))
-                > thresholds.min_scaling_abs
+                and abs(float(b_scaling)) > thresholds.min_scaling_abs
             )
         )
 
@@ -987,15 +1211,13 @@ def interpret_subtype_dosage(
             transition,
             thresholds,
         )
-
         response_ratio = _transition_response_ratio(
             transition=transition,
             log_effect_median=inputs["lp_median"],
             fractional_median=inputs["fractional_median"],
         )
-
         (
-            transition_hyper_supported,
+            posterior_hyper_supported,
             hyper_evidence_method,
         ) = _hyper_supported(
             transition=transition,
@@ -1005,27 +1227,52 @@ def interpret_subtype_dosage(
             thresholds=thresholds,
         )
 
-        pattern = _classify_transition(
+        model_pattern = _classify_transition(
             response_ratio=response_ratio,
             expected_supported=expected_supported,
             reverse_supported=reverse_supported,
             is_null=is_null,
-            hyper_supported=transition_hyper_supported,
+            hyper_supported=posterior_hyper_supported,
             thresholds=thresholds,
         )
 
+        empirical = _transition_empirical_support(
+            result,
+            subtype_index,
+            transition,
+            thresholds,
+        )
+        classifiable = bool(empirical["classifiable"])
+
+        # Keep the model-predicted transition pattern for descriptive use, but
+        # do not let an unsupported target state alter the gene-level class.
+        effective_pattern = (
+            model_pattern if classifiable else "unsupported_cn_state"
+        )
+        posterior_supported = expected_supported or reverse_supported
+        effective_supported = posterior_supported and classifiable
+        effective_null = is_null and classifiable
+        effective_hyper_supported = (
+            posterior_hyper_supported and classifiable
+        )
+        effective_reverse_supported = reverse_supported and classifiable
+
         transition_results[transition] = {
-            "pattern": pattern,
-            "supported": (
-                expected_supported or reverse_supported
-            ),
-            "expected_supported": expected_supported,
-            "reverse_supported": reverse_supported,
-            "null": is_null,
-            "support_method": support_method,
+            "pattern": effective_pattern,
+            "model_pattern": model_pattern,
+            "supported": effective_supported,
+            "posterior_supported": posterior_supported,
+            "expected_supported": expected_supported and classifiable,
+            "posterior_expected_supported": expected_supported,
+            "reverse_supported": effective_reverse_supported,
+            "posterior_reverse_supported": reverse_supported,
+            "null": effective_null,
+            "posterior_null": is_null,
+            "support_method": posterior_support_method,
             "cancellation_index": cancellation_index,
             "response_ratio": response_ratio,
-            "hyper_supported": transition_hyper_supported,
+            "hyper_supported": effective_hyper_supported,
+            "posterior_hyper_supported": posterior_hyper_supported,
             "hyper_evidence_method": hyper_evidence_method,
             "fractional_median": inputs["fractional_median"],
             "direction_probability": inputs[
@@ -1037,33 +1284,53 @@ def interpret_subtype_dosage(
             "rope_probability": inputs["rope_probability"],
             "ppd": inputs["ppd"],
             "scaling_stable": scaling_stable,
+            "classifiable": classifiable,
+            "empirical_supported": empirical["empirical_supported"],
+            "empirical_support_available": empirical["support_available"],
+            "empirical_support_method": empirical["method"],
+            "reference_cn_count": empirical["reference_count"],
+            "target_cn_count": empirical["target_count"],
+            "target_cn": empirical["target_cn"],
         }
 
-    ordered_transitions = ["2to1", "2to3", "2to4"]
     patterns = [
         transition_results[transition]["pattern"]
         for transition in ordered_transitions
     ]
     fractional_medians = [
-        transition_results[transition][
-            "fractional_median"
-        ]
+        transition_results[transition]["fractional_median"]
+        for transition in ordered_transitions
+    ]
+    classifiable = [
+        bool(transition_results[transition]["classifiable"])
         for transition in ordered_transitions
     ]
 
-    response_class, response_reason, response_subclass = (
-        _summarize_transition_patterns(
-            patterns,
-            fractional_medians=fractional_medians,
-            n_aneup=_get(result, "n_aneup", np.nan),
-            thresholds=thresholds,
-        )
+    (
+        response_class,
+        response_reason,
+        response_subclass,
+        evidence_scope,
+        classification_basis,
+    ) = _summarize_transition_patterns(
+        patterns,
+        transitions=ordered_transitions,
+        fractional_medians=fractional_medians,
+        classifiable=classifiable,
+        n_aneup=_get(result, "n_aneup", np.nan),
+        thresholds=thresholds,
     )
+
+    classifiable_transitions = [
+        transition
+        for transition in ordered_transitions
+        if transition_results[transition]["classifiable"]
+    ]
 
     dc_gain = any(
         transition_results[transition]["pattern"]
         in {"buffered", "overcompensated"}
-        for transition in ["2to3", "2to4"]
+        for transition in ["2to3", "2to4", "2to5"]
     )
     dc_loss = (
         transition_results["2to1"]["pattern"]
@@ -1084,10 +1351,17 @@ def interpret_subtype_dosage(
         f"response_class_{canonical_suffix}": response_class,
         f"response_reason_{canonical_suffix}": response_reason,
         f"response_subclass_{canonical_suffix}": response_subclass,
+        f"evidence_scope_{canonical_suffix}": evidence_scope,
+        f"classification_basis_{canonical_suffix}": classification_basis,
+        f"n_classifiable_transitions_{canonical_suffix}": len(
+            classifiable_transitions
+        ),
+        f"n_empirically_supported_transitions_{canonical_suffix}": sum(
+            transition_results[transition]["empirical_supported"] is True
+            for transition in ordered_transitions
+        ),
         f"small_deviation_{canonical_suffix}": small_deviation,
-        (
-            f"small_deviation_method_{canonical_suffix}"
-        ): small_deviation_method,
+        f"small_deviation_method_{canonical_suffix}": small_deviation_method,
         f"b_scaling_median_{canonical_suffix}": b_scaling,
         f"b_deviation_median_{canonical_suffix}": b_deviation,
         f"p_deviation_small_{canonical_suffix}": p_deviation_small,
@@ -1098,80 +1372,305 @@ def interpret_subtype_dosage(
 
     for transition in ordered_transitions:
         values = transition_results[transition]
-
         output.update(
             {
-                (
-                    f"transition_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["pattern"],
-                (
-                    f"transition_supported_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["supported"],
-                (
-                    f"transition_null_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["null"],
-                (
-                    f"transition_support_method_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["support_method"],
-                (
-                    f"cancel_index_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["cancellation_index"],
-                (
-                    f"fracCN_{transition}_median_"
-                    f"{canonical_suffix}"
-                ): values["fractional_median"],
-                (
-                    f"direction_probability_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["direction_probability"],
-                (
-                    f"rope_probability_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["rope_probability"],
-                (
-                    f"ppd_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["ppd"],
-                (
-                    f"response_ratio_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["response_ratio"],
-                (
-                    f"hyper_supported_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["hyper_supported"],
-                (
-                    f"hyper_evidence_method_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["hyper_evidence_method"],
-                (
-                    f"reverse_supported_{transition}_"
-                    f"{canonical_suffix}"
-                ): values["reverse_supported"],
+                f"transition_{transition}_{canonical_suffix}": values[
+                    "pattern"
+                ],
+                f"transition_model_pattern_{transition}_{canonical_suffix}": values[
+                    "model_pattern"
+                ],
+                f"transition_classifiable_{transition}_{canonical_suffix}": values[
+                    "classifiable"
+                ],
+                f"transition_empirical_support_{transition}_{canonical_suffix}": values[
+                    "empirical_supported"
+                ],
+                f"transition_empirical_support_available_{transition}_{canonical_suffix}": values[
+                    "empirical_support_available"
+                ],
+                f"transition_empirical_support_method_{transition}_{canonical_suffix}": values[
+                    "empirical_support_method"
+                ],
+                f"transition_reference_cn_count_{transition}_{canonical_suffix}": values[
+                    "reference_cn_count"
+                ],
+                f"transition_target_cn_count_{transition}_{canonical_suffix}": values[
+                    "target_cn_count"
+                ],
+                f"transition_target_cn_{transition}_{canonical_suffix}": values[
+                    "target_cn"
+                ],
+                f"transition_supported_{transition}_{canonical_suffix}": values[
+                    "supported"
+                ],
+                f"transition_posterior_supported_{transition}_{canonical_suffix}": values[
+                    "posterior_supported"
+                ],
+                f"transition_null_{transition}_{canonical_suffix}": values[
+                    "null"
+                ],
+                f"transition_posterior_null_{transition}_{canonical_suffix}": values[
+                    "posterior_null"
+                ],
+                f"transition_support_method_{transition}_{canonical_suffix}": values[
+                    "support_method"
+                ],
+                f"cancel_index_{transition}_{canonical_suffix}": values[
+                    "cancellation_index"
+                ],
+                f"fracCN_{transition}_median_{canonical_suffix}": values[
+                    "fractional_median"
+                ],
+                f"direction_probability_{transition}_{canonical_suffix}": values[
+                    "direction_probability"
+                ],
+                f"rope_probability_{transition}_{canonical_suffix}": values[
+                    "rope_probability"
+                ],
+                f"ppd_{transition}_{canonical_suffix}": values["ppd"],
+                f"response_ratio_{transition}_{canonical_suffix}": values[
+                    "response_ratio"
+                ],
+                f"hyper_supported_{transition}_{canonical_suffix}": values[
+                    "hyper_supported"
+                ],
+                f"posterior_hyper_supported_{transition}_{canonical_suffix}": values[
+                    "posterior_hyper_supported"
+                ],
+                f"hyper_evidence_method_{transition}_{canonical_suffix}": values[
+                    "hyper_evidence_method"
+                ],
+                f"reverse_supported_{transition}_{canonical_suffix}": values[
+                    "reverse_supported"
+                ],
+                f"posterior_reverse_supported_{transition}_{canonical_suffix}": values[
+                    "posterior_reverse_supported"
+                ],
             }
         )
 
-    # Human-readable aliases retained for compatibility with the old script.
+    # Human-readable aliases retained for backward compatibility.
     if safe_name != canonical_suffix:
         output.update(
             {
                 f"response_class_{safe_name}": response_class,
                 f"response_reason_{safe_name}": response_reason,
                 f"response_subclass_{safe_name}": response_subclass,
-                f"transition_2to1_{safe_name}": (
-                    transition_results["2to1"]["pattern"]
+                f"evidence_scope_{safe_name}": evidence_scope,
+                f"classification_basis_{safe_name}": classification_basis,
+                f"transition_2to1_{safe_name}": transition_results[
+                    "2to1"
+                ]["pattern"],
+                f"transition_2to3_{safe_name}": transition_results[
+                    "2to3"
+                ]["pattern"],
+                f"transition_2to4_{safe_name}": transition_results[
+                    "2to4"
+                ]["pattern"],
+                f"transition_2to5_{safe_name}": transition_results[
+                    "2to5"
+                ]["pattern"],
+            }
+        )
+
+    return output
+
+
+def _optional_bool(value: Any) -> bool | None:
+    """Interpret common boolean representations; return None if unknown."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+
+    if value is None or _is_nan_like(value):
+        return None
+
+    if isinstance(value, (int, np.integer)) and value in {0, 1}:
+        return bool(value)
+
+    if isinstance(value, str):
+        normalized = value.strip().casefold()
+        if normalized in {"true", "t", "1", "yes", "y"}:
+            return True
+        if normalized in {"false", "f", "0", "no", "n"}:
+            return False
+
+    return None
+
+
+def _classification_eligibility(
+    result: Mapping[str, Any],
+) -> tuple[bool, str | None]:
+    """Determine whether a fit may receive a biological response class.
+
+    Failed sampling and non-converged fits are excluded, as specified in the
+    manuscript. Legacy summaries without diagnostic metadata remain eligible
+    because convergence cannot be reconstructed from them.
+    """
+    success = _optional_bool(
+        _get(
+            result,
+            "batch_success",
+            _get(result, "success", np.nan),
+        )
+    )
+    if success is False:
+        return False, "fit_failed"
+
+    converged = _optional_bool(_get(result, "converged", np.nan))
+    if converged is False:
+        return False, "nonconverged"
+
+    fit_flag = str(_get(result, "fit_flag", "")).strip().casefold()
+
+    if fit_flag in {
+        "warn",
+        "warning",
+        "nonconverged",
+        "non-converged",
+    }:
+        return False, "nonconverged"
+
+    if fit_flag in {
+        "fail",
+        "failed",
+        "failure",
+        "error",
+    }:
+        return False, "fit_failed"
+
+    status = str(_get(result, "status", "")).strip().casefold()
+    if status in {
+        "fail",
+        "failed",
+        "failure",
+        "error",
+        "skipped",
+    }:
+        return False, f"status_{status}"
+
+    return True, None
+
+
+def _excluded_subtype_output(
+    result: Mapping[str, Any],
+    subtype_index: int,
+    subtype_levels: Sequence[str],
+    reason: str,
+    thresholds: ClassificationThresholds,
+) -> dict[str, Any]:
+    """Return schema-compatible fields for a computationally excluded fit."""
+    human_name = subtype_name(subtype_index, subtype_levels)
+    safe_name = _safe_label(human_name)
+    suffix = f"s{subtype_index}"
+
+    output: dict[str, Any] = {
+        f"subtype_{suffix}": human_name,
+        f"response_class_{suffix}": None,
+        f"response_reason_{suffix}": f"excluded:{reason}",
+        f"response_subclass_{suffix}": reason,
+        f"evidence_scope_{suffix}": "not_evaluated",
+        f"classification_basis_{suffix}": None,
+        f"n_classifiable_transitions_{suffix}": 0,
+        f"n_empirically_supported_transitions_{suffix}": 0,
+        f"small_deviation_{suffix}": None,
+        f"small_deviation_method_{suffix}": "not_evaluated",
+        f"b_scaling_median_{suffix}": _get(
+            result,
+            f"b_scaling_s{subtype_index}_median",
+            np.nan,
+        ),
+        f"b_deviation_median_{suffix}": _get(
+            result,
+            f"b_deviation_s{subtype_index}_median",
+            np.nan,
+        ),
+        f"p_deviation_small_{suffix}": _get(
+            result,
+            f"p_rope_bdev_s{subtype_index}",
+            np.nan,
+        ),
+        f"dc_gain_{suffix}": False,
+        f"dc_loss_{suffix}": False,
+        f"dc_type_{suffix}": "not_evaluated",
+    }
+
+    for transition in ("2to1", "2to3", "2to4", "2to5"):
+        fractional = _get(
+            result,
+            f"fracCN_{transition}_s{subtype_index}_median",
+            np.nan,
+        )
+        log_effect = _get(
+            result,
+            f"lp_{transition}_s{subtype_index}_median",
+            np.nan,
+        )
+        target_cn = _TRANSITION_TARGET_CN[transition]
+        reference_count = _empirical_cn_count(result, subtype_index, 2)
+        target_count = _empirical_cn_count(result, subtype_index, target_cn)
+
+        output.update(
+            {
+                f"transition_{transition}_{suffix}": None,
+                f"transition_model_pattern_{transition}_{suffix}": None,
+                f"transition_classifiable_{transition}_{suffix}": False,
+                f"transition_empirical_support_{transition}_{suffix}": None,
+                f"transition_empirical_support_available_{transition}_{suffix}": False,
+                f"transition_empirical_support_method_{transition}_{suffix}": "not_evaluated",
+                f"transition_reference_cn_count_{transition}_{suffix}": reference_count,
+                f"transition_target_cn_count_{transition}_{suffix}": target_count,
+                f"transition_target_cn_{transition}_{suffix}": target_cn,
+                f"transition_supported_{transition}_{suffix}": False,
+                f"transition_posterior_supported_{transition}_{suffix}": False,
+                f"transition_null_{transition}_{suffix}": False,
+                f"transition_posterior_null_{transition}_{suffix}": False,
+                f"transition_support_method_{transition}_{suffix}": "not_evaluated",
+                f"cancel_index_{transition}_{suffix}": _transition_ci(
+                    result,
+                    subtype_index,
+                    transition,
+                    thresholds,
                 ),
-                f"transition_2to3_{safe_name}": (
-                    transition_results["2to3"]["pattern"]
+                f"fracCN_{transition}_median_{suffix}": fractional,
+                f"direction_probability_{transition}_{suffix}": np.nan,
+                f"rope_probability_{transition}_{suffix}": _get(
+                    result,
+                    f"p_rope_fracCN_{transition}_s{subtype_index}",
+                    np.nan,
                 ),
-                f"transition_2to4_{safe_name}": (
-                    transition_results["2to4"]["pattern"]
+                f"ppd_{transition}_{suffix}": _get(
+                    result,
+                    f"ppd_fracCN_{transition}_s{subtype_index}",
+                    np.nan,
                 ),
+                f"response_ratio_{transition}_{suffix}": (
+                    _transition_response_ratio(
+                        transition=transition,
+                        log_effect_median=log_effect,
+                        fractional_median=fractional,
+                    )
+                ),
+                f"hyper_supported_{transition}_{suffix}": False,
+                f"posterior_hyper_supported_{transition}_{suffix}": False,
+                f"hyper_evidence_method_{transition}_{suffix}": "not_evaluated",
+                f"reverse_supported_{transition}_{suffix}": False,
+                f"posterior_reverse_supported_{transition}_{suffix}": False,
+            }
+        )
+
+    if safe_name != suffix:
+        output.update(
+            {
+                f"response_class_{safe_name}": None,
+                f"response_reason_{safe_name}": f"excluded:{reason}",
+                f"response_subclass_{safe_name}": reason,
+                f"evidence_scope_{safe_name}": "not_evaluated",
+                f"classification_basis_{safe_name}": None,
+                f"transition_2to1_{safe_name}": None,
+                f"transition_2to3_{safe_name}": None,
+                f"transition_2to4_{safe_name}": None,
+                f"transition_2to5_{safe_name}": None,
             }
         )
 
@@ -1205,6 +1704,10 @@ def _fit_to_result(fit: Any) -> dict[str, Any]:
                 if diagnostics.get("converged") is False
                 else "ok"
             ),
+        )
+        result.setdefault(
+            "converged",
+            diagnostics.get("converged"),
         )
         result.setdefault(
             "diagnostic_status",
@@ -1267,10 +1770,13 @@ def classify_gene_result(
             default=default_s,
         )
 
+    eligible, exclusion_reason = _classification_eligibility(result)
+
     output: dict[str, Any] = {
         "gene": _get(result, "gene", None),
         "status": _get(result, "status", "ok"),
         "fit_flag": _get(result, "fit_flag", "ok"),
+        "converged": _get(result, "converged", np.nan),
         "analysis_mode": analysis_mode,
         "N": _get(result, "N", np.nan),
         "n_aneup": _get(result, "n_aneup", np.nan),
@@ -1278,7 +1784,59 @@ def classify_gene_result(
         "S": number_of_subtypes,
         "subtype_levels": subtype_levels,
         "subtype_levels_str": "|".join(subtype_levels),
+        "classification_eligible": eligible,
+        "classification_exclusion_reason": exclusion_reason,
     }
+
+    # A computational failure is not UNC. UNC is reserved for an ambiguous but valid posterior fit.
+    if not eligible:
+        output.update(
+            {
+                "de_status": "not_evaluated",
+                "ppd_tumor": _get(result, "ppd_tumor", np.nan),
+                "p_rope_tumor": _get(result, "p_rope_tumor", np.nan),
+                "tumor0_lfc_median": _get(result, "tumor0_lfc_median", np.nan),
+                "tumor0_lfc_q025": _get(result, "tumor0_lfc_q025", np.nan),
+                "tumor0_lfc_q975": _get(result, "tumor0_lfc_q975", np.nan),
+                "rewiring_status": "not_evaluated",
+                "scaling_rewired": False,
+                "deviation_rewired": False,
+                "scaling_rewiring_evidence": "not_evaluated",
+                "deviation_rewiring_evidence": "not_evaluated",
+                "ppd_scaling": _get(result, "ppd_scaling", np.nan),
+                "ppd_dev": _get(result, "ppd_dev", np.nan),
+                "p_rope_scaling": _get(result, "p_rope_scaling", np.nan),
+                "p_rope_dev": _get(result, "p_rope_dev", np.nan),
+                "delta_scaling_median": _get(
+                    result, "delta_scaling_median", np.nan
+                ),
+                "delta_scaling_q025": _get(
+                    result, "delta_scaling_q025", np.nan
+                ),
+                "delta_scaling_q975": _get(
+                    result, "delta_scaling_q975", np.nan
+                ),
+                "delta_dev_median": _get(result, "delta_dev_median", np.nan),
+                "delta_dev_q025": _get(result, "delta_dev_q025", np.nan),
+                "delta_dev_q975": _get(result, "delta_dev_q975", np.nan),
+            }
+        )
+
+        for subtype_index in range(1, number_of_subtypes + 1):
+            output.update(
+                _excluded_subtype_output(
+                    result,
+                    subtype_index,
+                    subtype_levels,
+                    exclusion_reason or "ineligible_fit",
+                    thresholds,
+                )
+            )
+
+        output["summary_label"] = (
+            f"excluded:{exclusion_reason or 'ineligible_fit'}"
+        )
+        return output
 
     output.update(
         interpret_baseline_de(
@@ -1354,12 +1912,337 @@ def classify_gene(
         thresholds=thresholds,
     )
 
+def _ast_dotted_name(node: ast.AST) -> str | None:
+    """Return a dotted name such as ``np.float64`` for a simple AST node."""
+    if isinstance(node, ast.Name):
+        return node.id
+
+    if isinstance(node, ast.Attribute):
+        parent = _ast_dotted_name(node.value)
+        if parent is None:
+            return None
+        return f"{parent}.{node.attr}"
+
+    return None
+
+class _SerializedResultNormalizer(ast.NodeTransformer):
+    """Normalize safe NumPy/pandas tokens found in dict strings from CSV files.
+
+    ``ast.literal_eval`` intentionally rejects names such as ``nan`` and calls
+    such as ``np.float64(0.5)``.  These representations commonly appear after
+    a Python dictionary containing NumPy scalars or missing values has been
+    converted to text and round-tripped through CSV.
+
+    Only a small whitelist of numeric/missing-value constructs is accepted.
+    Arbitrary names, attributes, and function calls remain rejected.
+    """
+
+    _NAN_NAMES = {
+        "nan",
+        "NaN",
+        "NAN",
+    }
+
+    _INF_NAMES = {
+        "inf",
+        "Inf",
+        "INF",
+        "Infinity",
+        "infinity",
+    }
+
+    _NAN_ATTRIBUTES = {
+        "np.nan",
+        "numpy.nan",
+        "pd.NA",
+        "pandas.NA",
+    }
+
+    _INF_ATTRIBUTES = {
+        "np.inf",
+        "numpy.inf",
+    }
+
+    _NUMERIC_WRAPPERS = {
+        "float",
+        "int",
+        "np.float16",
+        "np.float32",
+        "np.float64",
+        "numpy.float16",
+        "numpy.float32",
+        "numpy.float64",
+        "np.int8",
+        "np.int16",
+        "np.int32",
+        "np.int64",
+        "numpy.int8",
+        "numpy.int16",
+        "numpy.int32",
+        "numpy.int64",
+        "np.uint8",
+        "np.uint16",
+        "np.uint32",
+        "np.uint64",
+        "numpy.uint8",
+        "numpy.uint16",
+        "numpy.uint32",
+        "numpy.uint64",
+        "np.bool_",
+        "numpy.bool_",
+        "bool",
+    }
+
+    _ARRAY_WRAPPERS = {
+        "array",
+        "np.array",
+        "numpy.array",
+    }
+
+    def visit_Name(self, node: ast.Name) -> ast.AST:
+        if node.id in self._NAN_NAMES:
+            return ast.copy_location(
+                ast.Constant(value=float("nan")),
+                node,
+            )
+
+        if node.id in self._INF_NAMES:
+            return ast.copy_location(
+                ast.Constant(value=float("inf")),
+                node,
+            )
+
+        # Do not silently evaluate any other bare name.
+        return node
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        dotted = _ast_dotted_name(node)
+
+        if dotted in self._NAN_ATTRIBUTES:
+            return ast.copy_location(
+                ast.Constant(value=float("nan")),
+                node,
+            )
+
+        if dotted in self._INF_ATTRIBUTES:
+            return ast.copy_location(
+                ast.Constant(value=float("inf")),
+                node,
+            )
+
+        return self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        dotted = _ast_dotted_name(node.func)
+
+        if dotted in self._NUMERIC_WRAPPERS:
+            if len(node.args) != 1 or node.keywords:
+                return node
+
+            argument = self.visit(node.args[0])
+
+            # Convert simple constants to their ordinary Python scalar form.
+            if isinstance(argument, ast.Constant):
+                value = argument.value
+
+                try:
+                    if dotted.endswith(("bool", "bool_")):
+                        converted = bool(value)
+                    elif ".int" in dotted or ".uint" in dotted or dotted == "int":
+                        converted = int(value)
+                    else:
+                        converted = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    return node
+
+                return ast.copy_location(
+                    ast.Constant(value=converted),
+                    node,
+                )
+
+            # A signed numeric expression such as np.float64(-1.2) is already
+            # safe for literal_eval once the wrapper is removed.
+            if isinstance(argument, ast.UnaryOp):
+                return ast.copy_location(argument, node)
+
+            return node
+
+        if dotted in self._ARRAY_WRAPPERS:
+            if len(node.args) == 1 and not node.keywords:
+                argument = self.visit(node.args[0])
+
+                # Preserve the serialized information as an ordinary list or
+                # tuple; classification code does not require ndarray methods.
+                if isinstance(
+                    argument,
+                    (ast.List, ast.Tuple, ast.Set, ast.Constant),
+                ):
+                    return ast.copy_location(argument, node)
+
+            return node
+
+        return self.generic_visit(node)
+
+def _safe_serialized_literal_eval(value: str) -> Any:
+    """Safely parse a serialized Python literal with common NumPy NA tokens."""
+    try:
+        tree = ast.parse(value, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(
+            "Serialized result is not valid Python-literal syntax."
+        ) from exc
+
+    tree = _SerializedResultNormalizer().visit(tree)
+    ast.fix_missing_locations(tree)
+
+    try:
+        return ast.literal_eval(tree)
+    except (SyntaxError, ValueError, TypeError) as exc:
+        # Report unresolved names/calls to make problematic saved rows easier
+        # to diagnose without executing arbitrary text.
+        unresolved_names = sorted(
+            {
+                node.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Name)
+            }
+        )
+        unresolved_calls = sorted(
+            {
+                name
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call)
+                for name in [_ast_dotted_name(node.func)]
+                if name is not None
+            }
+        )
+
+        details: list[str] = []
+
+        if unresolved_names:
+            details.append(
+                "unrecognized names="
+                + repr(unresolved_names[:10])
+            )
+
+        if unresolved_calls:
+            details.append(
+                "unrecognized calls="
+                + repr(unresolved_calls[:10])
+            )
+
+        suffix = (
+            " (" + "; ".join(details) + ")"
+            if details
+            else ""
+        )
+
+        raise ValueError(
+            "Could not safely parse a serialized result mapping"
+            f"{suffix}."
+        ) from exc
+    
+
+def _coerce_saved_result(
+    value: Any,
+) -> dict[str, Any]:
+    """Convert a saved ``result`` cell into a flat result mapping.
+
+    The preferred representation is a real mapping.  CSV round-trips may turn
+    dictionaries into strings containing ordinary Python literals and, in some
+    datasets, NumPy/pandas representations such as ``nan``, ``np.nan``,
+    ``np.float64(...)`` or ``array([...])``.  These common safe constructs are
+    normalized before ``ast.literal_eval``; arbitrary code is never executed.
+    """
+    if isinstance(value, Mapping):
+        return dict(value)
+
+    if value is None or _is_nan_like(value):
+        return {}
+
+    if isinstance(value, str):
+        stripped = value.strip()
+
+        if not stripped:
+            return {}
+
+        parsed = _safe_serialized_literal_eval(stripped)
+
+        if not isinstance(parsed, Mapping):
+            raise TypeError(
+                "Serialized result must evaluate to a mapping; "
+                f"received {type(parsed).__name__}."
+            )
+
+        return dict(parsed)
+
+    raise TypeError(
+        "result must be a mapping, a serialized mapping string, "
+        f"or a missing value; received {type(value).__name__}."
+    )
+
+
+
+def _result_record_from_dataframe_row(
+    record: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Normalize one row from either a flat or nested results data frame."""
+    # Existing/legacy format: every posterior-summary field is already a
+    # top-level data-frame column.
+    if "result" not in record:
+        return dict(record)
+
+    # Saved batch format: posterior summary is nested in the ``result`` cell,
+    # while columns such as gene/success/error remain outside it.
+    result = _coerce_saved_result(record.get("result"))
+
+    outer_gene = record.get("gene")
+    if not result.get("gene") and not _is_nan_like(outer_gene):
+        result["gene"] = outer_gene
+
+    # Preserve batch-execution metadata without overwriting posterior fields.
+    if "success" in record:
+        result.setdefault("batch_success", record.get("success"))
+
+    if "converged" in record:
+        result.setdefault("converged", record.get("converged"))
+
+    if "fit_flag" in record:
+        result.setdefault("fit_flag", record.get("fit_flag"))
+
+    if "diagnostic_status" in record:
+        result.setdefault(
+            "diagnostic_status",
+            record.get("diagnostic_status"),
+        )
+
+    if "error" in record and not _is_nan_like(record.get("error")):
+        result.setdefault("batch_error", record.get("error"))
+
+    return result
+
 
 def classify_fits(
-    fits: Mapping[str, Any],
+    fits: Mapping[str, Any] | pd.DataFrame,
     thresholds: ClassificationThresholds | None = None,
 ) -> pd.DataFrame:
-    """Classify a dictionary such as ``fits_rep``."""
+    """Classify fitted objects or a saved results data frame.
+
+    ``Mapping[str, BDGDMFit]`` inputs retain the original behaviour.  A pandas
+    DataFrame is delegated to :func:`classify_results_dataframe`, including
+    the saved batch format with a nested/serialized ``result`` column.
+    """
+    if isinstance(fits, pd.DataFrame):
+        return classify_results_dataframe(
+            fits,
+            thresholds=thresholds,
+        )
+
+    if not isinstance(fits, Mapping):
+        raise TypeError(
+            "fits must be a mapping of gene -> fit or a pandas DataFrame."
+        )
+
     records: list[dict[str, Any]] = []
 
     for gene, fit in fits.items():
@@ -1383,8 +2266,29 @@ def classify_results_dataframe(
     keep_original: bool = False,
     drop_duplicate_classified_keys: bool = True,
 ) -> pd.DataFrame:
-    """Classify every row of a posterior-summary data frame."""
-    records = dataframe.to_dict(orient="records")
+    """Classify every row of a posterior-summary data frame.
+
+    Two input layouts are supported:
+
+    1. a flat table in which posterior-summary fields are ordinary columns;
+    2. a saved batch table with columns such as ``gene``, ``success``,
+       ``result`` and ``error``, where ``result`` is either a mapping or a
+       string representation of one.
+    """
+    source_records = dataframe.to_dict(orient="records")
+    result_records: list[dict[str, Any]] = []
+
+    for row_number, source_record in enumerate(source_records):
+        try:
+            result_record = _result_record_from_dataframe_row(source_record)
+        except (TypeError, ValueError) as exc:
+            gene = source_record.get("gene", f"row_{row_number}")
+            raise ValueError(
+                f"Could not normalize result for gene {gene!r} "
+                f"at row {row_number}."
+            ) from exc
+
+        result_records.append(result_record)
 
     classified = pd.DataFrame.from_records(
         [
@@ -1392,7 +2296,7 @@ def classify_results_dataframe(
                 record,
                 thresholds=thresholds,
             )
-            for record in records
+            for record in result_records
         ]
     )
 
@@ -1620,6 +2524,12 @@ def get_subtype_classification(
         "gene": classification.get("gene"),
         "status": classification.get("status"),
         "fit_flag": classification.get("fit_flag"),
+        "classification_eligible": classification.get(
+            "classification_eligible"
+        ),
+        "classification_exclusion_reason": classification.get(
+            "classification_exclusion_reason"
+        ),
         "analysis_mode": classification.get("analysis_mode"),
         "N": classification.get("N"),
         "n_aneup": classification.get("n_aneup"),
@@ -1634,6 +2544,18 @@ def get_subtype_classification(
         ),
         "response_subclass": classification.get(
             f"response_subclass_{suffix}"
+        ),
+        "evidence_scope": classification.get(
+            f"evidence_scope_{suffix}"
+        ),
+        "classification_basis": classification.get(
+            f"classification_basis_{suffix}"
+        ),
+        "n_classifiable_transitions": classification.get(
+            f"n_classifiable_transitions_{suffix}"
+        ),
+        "n_empirically_supported_transitions": classification.get(
+            f"n_empirically_supported_transitions_{suffix}"
         ),
         "b_scaling_median": classification.get(
             f"b_scaling_median_{suffix}"
@@ -1683,15 +2605,7 @@ def get_transition_classification(
     subtype: int | str | None = None,
     thresholds: ClassificationThresholds | None = None,
 ) -> dict[str, Any]:
-    """
-    Return detailed classification evidence for one CN transition.
-
-    Parameters
-    ----------
-    transition
-        One of ``"2to1"``, ``"2to3"``, ``"2to4"`` or the corresponding
-        arrow notation, for example ``"2→3"``.
-    """
+    """Return posterior and empirical-support evidence for one CN transition."""
     normalized_transition = (
         str(transition)
         .strip()
@@ -1704,50 +2618,78 @@ def get_transition_classification(
         "2to1",
         "2to3",
         "2to4",
+        "2to5",
     }:
         raise ValueError(
-            "transition must be one of '2to1', '2to3', or '2to4'."
+            "transition must be one of '2to1', '2to3', '2to4', or '2to5'."
         )
 
     classification = _coerce_classification(
         fit_or_result,
         thresholds=thresholds,
     )
-    subtype_index = _resolve_subtype_index(
-        classification,
-        subtype,
-    )
+    subtype_index = _resolve_subtype_index(classification, subtype)
     suffix = f"s{subtype_index}"
     subtype_label = classification.get(
         f"subtype_{suffix}",
         subtype_name(
             subtype_index,
             normalize_subtype_levels(
-                classification.get(
-                    "subtype_levels",
-                    None,
-                )
+                classification.get("subtype_levels", None)
             ),
         ),
     )
 
     return {
         "gene": classification.get("gene"),
+        "classification_eligible": classification.get(
+            "classification_eligible"
+        ),
+        "classification_exclusion_reason": classification.get(
+            "classification_exclusion_reason"
+        ),
         "subtype_index": subtype_index,
         "subtype": subtype_label,
-        "transition": normalized_transition.replace(
-            "to",
-            "→",
-        ),
+        "transition": normalized_transition.replace("to", "→"),
         "transition_key": normalized_transition,
         "pattern": classification.get(
             f"transition_{normalized_transition}_{suffix}"
         ),
+        "model_pattern": classification.get(
+            f"transition_model_pattern_{normalized_transition}_{suffix}"
+        ),
+        "classifiable": classification.get(
+            f"transition_classifiable_{normalized_transition}_{suffix}"
+        ),
+        "empirical_support": classification.get(
+            f"transition_empirical_support_{normalized_transition}_{suffix}"
+        ),
+        "empirical_support_available": classification.get(
+            f"transition_empirical_support_available_{normalized_transition}_{suffix}"
+        ),
+        "empirical_support_method": classification.get(
+            f"transition_empirical_support_method_{normalized_transition}_{suffix}"
+        ),
+        "reference_cn_count": classification.get(
+            f"transition_reference_cn_count_{normalized_transition}_{suffix}"
+        ),
+        "target_cn_count": classification.get(
+            f"transition_target_cn_count_{normalized_transition}_{suffix}"
+        ),
+        "target_cn": classification.get(
+            f"transition_target_cn_{normalized_transition}_{suffix}"
+        ),
         "supported": classification.get(
             f"transition_supported_{normalized_transition}_{suffix}"
         ),
+        "posterior_supported": classification.get(
+            f"transition_posterior_supported_{normalized_transition}_{suffix}"
+        ),
         "null": classification.get(
             f"transition_null_{normalized_transition}_{suffix}"
+        ),
+        "posterior_null": classification.get(
+            f"transition_posterior_null_{normalized_transition}_{suffix}"
         ),
         "support_method": classification.get(
             f"transition_support_method_{normalized_transition}_{suffix}"
@@ -1770,11 +2712,17 @@ def get_transition_classification(
         "hyper_supported": classification.get(
             f"hyper_supported_{normalized_transition}_{suffix}"
         ),
+        "posterior_hyper_supported": classification.get(
+            f"posterior_hyper_supported_{normalized_transition}_{suffix}"
+        ),
         "hyper_evidence_method": classification.get(
             f"hyper_evidence_method_{normalized_transition}_{suffix}"
         ),
         "reverse_supported": classification.get(
             f"reverse_supported_{normalized_transition}_{suffix}"
+        ),
+        "posterior_reverse_supported": classification.get(
+            f"posterior_reverse_supported_{normalized_transition}_{suffix}"
         ),
         "cancellation_index": classification.get(
             f"cancel_index_{normalized_transition}_{suffix}"
@@ -1866,6 +2814,7 @@ def get_transition_df(
             "2to1",
             "2to3",
             "2to4",
+            "2to5",
         ):
             records.append(
                 get_transition_classification(
@@ -1877,19 +2826,39 @@ def get_transition_df(
 
     return pd.DataFrame.from_records(records)
 
+
+def classification_to_transition_df(
+    fit_or_result: Any,
+    subtype: int | str | None = None,
+    thresholds: ClassificationThresholds | None = None,
+) -> pd.DataFrame:
+    """Backward-compatible tidy transition DataFrame wrapper."""
+    return get_transition_df(
+        fit_or_result,
+        subtype=subtype,
+        thresholds=thresholds,
+    )
+
+
 def summarize_response_classes(
     classified_dataframe: pd.DataFrame,
 ) -> dict[str, pd.Series]:
-    """Count response classes for canonical subtype columns."""
+    """Count response classes among classification-eligible fits."""
+    dataframe = classified_dataframe
+
+    if "classification_eligible" in dataframe.columns:
+        eligible = dataframe["classification_eligible"].map(_optional_bool)
+        dataframe = dataframe.loc[eligible.eq(True)].copy()
+
     columns = [
         column
-        for column in classified_dataframe.columns
+        for column in dataframe.columns
         if re.fullmatch(r"response_class_s\d+", column)
     ]
 
     return {
-        column: classified_dataframe[column].value_counts(
-            dropna=False
+        column: dataframe[column].value_counts(
+            dropna=True
         )
         for column in columns
     }
@@ -1898,19 +2867,25 @@ def summarize_response_classes(
 def summarize_transition_patterns(
     classified_dataframe: pd.DataFrame,
 ) -> dict[str, pd.Series]:
-    """Count transition patterns for canonical subtype columns."""
+    """Count transition patterns among classification-eligible fits."""
+    dataframe = classified_dataframe
+
+    if "classification_eligible" in dataframe.columns:
+        eligible = dataframe["classification_eligible"].map(_optional_bool)
+        dataframe = dataframe.loc[eligible.eq(True)].copy()
+
     columns = [
         column
-        for column in classified_dataframe.columns
+        for column in dataframe.columns
         if re.fullmatch(
-            r"transition_2to[134]_s\d+",
+            r"transition_2to[1345]_s\d+",
             column,
         )
     ]
 
     return {
-        column: classified_dataframe[column].value_counts(
-            dropna=False
+        column: dataframe[column].value_counts(
+            dropna=True
         )
         for column in columns
     }
@@ -1989,6 +2964,12 @@ def get_rewiring_summary(
         "gene": classification.get("gene"),
         "status": classification.get("status"),
         "fit_flag": classification.get("fit_flag"),
+        "classification_eligible": classification.get(
+            "classification_eligible"
+        ),
+        "classification_exclusion_reason": classification.get(
+            "classification_exclusion_reason"
+        ),
         "analysis_mode": classification.get(
             "analysis_mode"
         ),

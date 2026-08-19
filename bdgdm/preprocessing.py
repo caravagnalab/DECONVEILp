@@ -1,21 +1,35 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
+
+"""Utilities for preparing Stan BDGDM inputs.
+
+In addition to constructing the Stan data dictionary, this module records
+empirical copy-number-state support from the exact samples retained for each
+fit.  These counts are metadata only: they are not passed to Stan.  They can be
+used downstream to distinguish locally supported CN transitions from model
+extrapolations during DSG/DCG/DIG/HYPER/Mixed classification.
 """
 
-Utilities for preparing Stan BDGDM inputs.
-
-"""
 # Metadata object
 
 @dataclass(frozen=True)
 class BDGDMMetadata:
-    """Metadata describing the processed one-gene dataset."""
+    """Metadata describing the processed one-gene dataset.
+
+    ``n_cn*`` counts are calculated *after* all gene-level NA and CNA filtering,
+    so they describe exactly the observations used to fit the model.
+
+    ``cn_support_by_subtype`` stores the same quantities separately for each
+    subtype/group.  The mapping is keyed by the human-readable subtype label.
+    Each entry contains ``N``, ``n_aneup``, ``n_cn0``, ``n_cn1``, ``n_cn2``,
+    ``n_cn3``, ``n_cn4``, and ``n_cn5plus``.
+    """
 
     gene: str | None
     analysis_mode: str
@@ -25,6 +39,127 @@ class BDGDMMetadata:
     n_aneup: int
     cna: str
 
+    # Empirical local support around absolute CN states.
+    
+    cn_state_tolerance: float = 0.15
+    n_cn0: int = 0
+    n_cn1: int = 0
+    n_cn2: int = 0
+    n_cn3: int = 0
+    n_cn4: int = 0
+    n_cn5plus: int = 0
+    cn_support_by_subtype: dict[str, dict[str, int]] = field(
+        default_factory=dict
+    )
+
+
+def _validate_cn_state_tolerance(value: float) -> float:
+    """Validate the local CN-state tolerance used for empirical support.
+
+    A value below 0.5 guarantees that the CN0--CN4 neighborhoods do not
+    overlap.  CN5+ starts at ``5 - tolerance``.
+    """
+    tolerance = float(value)
+
+    if not np.isfinite(tolerance):
+        raise ValueError("cn_state_tolerance must be finite.")
+
+    if not 0 <= tolerance < 0.5:
+        raise ValueError(
+            "cn_state_tolerance must satisfy 0 <= tolerance < 0.5."
+        )
+
+    return tolerance
+
+
+def summarize_cn_support(
+    copies: pd.Series | np.ndarray,
+    *,
+    cn_state_tolerance: float = 0.15,
+    aneuploid_tolerance: float = 0.15,
+) -> dict[str, int]:
+    """Summarize empirical absolute-CN support for one fitted sample set.
+
+    Parameters
+    ----------
+    copies
+        Absolute copy-number values for the samples that actually enter the
+        fit. Values must be finite and non-negative.
+    cn_state_tolerance
+        Local neighborhood around the canonical integer states CN0--CN4.
+        For example, with ``0.15``, CN3 support is ``2.85 <= CN <= 3.15``.
+        CN5+ support is defined as ``CN >= 5 - tolerance``.
+    aneuploid_tolerance
+        The existing BDGDM ``et`` value.  ``n_aneup`` is computed with the
+        legacy criterion ``abs(CN - 2) > 1 - et`` so existing fit eligibility
+        behavior is unchanged.
+
+    Returns
+    -------
+    dict
+        Counts ``N``, ``n_aneup``, ``n_cn0``, ``n_cn1``, ``n_cn2``,
+        ``n_cn3``, ``n_cn4``, ``n_cn5plus``.
+    """
+    tolerance = _validate_cn_state_tolerance(cn_state_tolerance)
+
+    et = float(aneuploid_tolerance)
+    if not np.isfinite(et) or not 0 <= et < 1:
+        raise ValueError("aneuploid_tolerance must satisfy 0 <= et < 1.")
+
+    cn = np.asarray(copies, dtype=float).reshape(-1)
+
+    if not np.isfinite(cn).all():
+        raise ValueError("Copy-number values must be finite.")
+
+    if (cn < 0).any():
+        raise ValueError("Copy-number values must be non-negative.")
+
+    # Local support around canonical integer states.  The strict <0.5 tolerance validation guarantees mutually exclusive neighborhoods.
+    cn0 = cn <= tolerance
+    cn1 = np.abs(cn - 1.0) <= tolerance
+    cn2 = np.abs(cn - 2.0) <= tolerance
+    cn3 = np.abs(cn - 3.0) <= tolerance
+    cn4 = np.abs(cn - 4.0) <= tolerance
+    cn5plus = cn >= (5.0 - tolerance)
+
+    assigned = cn0 | cn1 | cn2 | cn3 | cn4 | cn5plus
+
+    aneuploid = np.abs(cn - 2.0) > (1.0 - et)
+
+    return {
+        "N": int(cn.size),
+        "n_aneup": int(aneuploid.sum()),
+        "n_cn0": int(cn0.sum()),
+        "n_cn1": int(cn1.sum()),
+        "n_cn2": int(cn2.sum()),
+        "n_cn3": int(cn3.sum()),
+        "n_cn4": int(cn4.sum()),
+        "n_cn5plus": int(cn5plus.sum()),
+    }
+
+
+def _summarize_cn_support_by_subtype(
+    df: pd.DataFrame,
+    *,
+    subtype_col: str,
+    subtype_levels: list[str],
+    cn_state_tolerance: float,
+    et: float,
+) -> dict[str, dict[str, int]]:
+    """Return empirical CN support separately for each fitted subtype."""
+    output: dict[str, dict[str, int]] = {}
+
+    for subtype in subtype_levels:
+        subtype_df = df.loc[df[subtype_col].astype(str) == str(subtype)]
+
+        output[str(subtype)] = summarize_cn_support(
+            subtype_df["copies"].to_numpy(dtype=float),
+            cn_state_tolerance=cn_state_tolerance,
+            aneuploid_tolerance=et,
+        )
+
+    return output
+
 
 def prepare_gene_data(
     gene_df: pd.DataFrame,
@@ -33,13 +168,13 @@ def prepare_gene_data(
     subtype_col: str = "subtype",
     cna: str = "all",
     et: float = 0.15,
+    cn_state_tolerance: float | None = None,
     min_aneup: int = 5,
     min_unique_counts: int = 5,
     min_cn_abs_sum: float = 1.0,
     subtype_order: list[str] | None = None,
 ) -> tuple[pd.DataFrame, dict[str, Any], BDGDMMetadata]:
-    """
-    Validate one-gene data and construct input for the appropriate Stan model.
+    """Validate one-gene data and construct input for the appropriate Stan model.
 
     The returned Stan dictionary depends on the inferred analysis mode:
 
@@ -48,19 +183,38 @@ def prepare_gene_data(
         ``N``, ``y``, ``sf``, ``purity``, ``dose_log``, and ``dev``.
 
     ``subtype_comparison``
-        Also returns ``S`` and ``subtype`` for
-        ``bdgdm_subtype.stan``.
+        Also returns ``S`` and ``subtype`` for ``bdgdm_subtype.stan``.
+
+    Parameters
+    ----------
+    cn_state_tolerance
+        Local tolerance used only for empirical CN-state support metadata.
+        When ``None`` (default), it is set equal to ``et``.  This does not alter
+        the Stan likelihood or covariates.
 
     Notes
     -----
-    ``cna="amp"`` retains diploid/reference and gain samples by removing clear losses. 
-    ``cna="del"`` retains diploid/reference and loss samples by removing clear gains.
+    ``cna="amp"`` retains diploid/reference and gain samples by removing clear
+    losses. ``cna="del"`` retains diploid/reference and loss samples by removing
+    clear gains.
+
+    Empirical CN counts are calculated after all filtering, from the same rows
+    used to construct the Stan vectors.  They are returned in ``metadata`` and
+    are deliberately not added to ``stan_data`` because the Stan model does not
+    declare them.
     """
     if not isinstance(gene_df, pd.DataFrame):
         raise TypeError("gene_df must be a pandas DataFrame.")
 
     if not 0 <= et < 1:
         raise ValueError("et must satisfy 0 <= et < 1.")
+
+    if cn_state_tolerance is None:
+        cn_state_tolerance = float(et)
+
+    cn_state_tolerance = _validate_cn_state_tolerance(
+        cn_state_tolerance
+    )
 
     if min_aneup < 0:
         raise ValueError("min_aneup cannot be negative.")
@@ -73,9 +227,9 @@ def prepare_gene_data(
 
     df = gene_df.copy()
 
-
+    # ------------------------------------------------------------------
     # Select exactly one gene.
-
+    # ------------------------------------------------------------------
     if "gene" in df.columns:
         if gene is not None:
             df = df.loc[df["gene"].astype(str) == str(gene)].copy()
@@ -100,9 +254,9 @@ def prepare_gene_data(
     if df.empty:
         raise ValueError("No rows remain after gene filtering.")
 
-    
+    # ------------------------------------------------------------------
     # Required columns and missing values.
-
+    # ------------------------------------------------------------------
     required = [
         "expr",
         "copies",
@@ -188,8 +342,9 @@ def prepare_gene_data(
     if (df["expr"] == 0).all():
         raise ValueError("All expression counts are zero.")
 
-    # Copy-number support.
-    
+    # ------------------------------------------------------------------
+    # Overall copy-number support (legacy fit-eligibility criterion).
+    # ------------------------------------------------------------------
     aneuploid_mask = np.abs(df["copies"] - 2.0) > (1.0 - et)
     n_aneup = int(aneuploid_mask.sum())
 
@@ -208,8 +363,9 @@ def prepare_gene_data(
             f"< {min_cn_abs_sum}."
         )
 
+    # ------------------------------------------------------------------
     # Encode subtype.
-    
+    # ------------------------------------------------------------------
     df[subtype_col] = df[subtype_col].astype(str)
     observed_levels = df[subtype_col].drop_duplicates().tolist()
 
@@ -267,6 +423,30 @@ def prepare_gene_data(
     )
 
     # ------------------------------------------------------------------
+    # Empirical CN-state support from the exact fitted rows.
+    # ------------------------------------------------------------------
+    cn_support = summarize_cn_support(
+        df["copies"].to_numpy(dtype=float),
+        cn_state_tolerance=cn_state_tolerance,
+        aneuploid_tolerance=et,
+    )
+
+    # Sanity check: both implementations of the existing n_aneup definition
+    # must agree before we persist the metadata.
+    if int(cn_support["n_aneup"]) != n_aneup:
+        raise RuntimeError(
+            "Internal inconsistency while calculating n_aneup."
+        )
+
+    cn_support_by_subtype = _summarize_cn_support_by_subtype(
+        df,
+        subtype_col=subtype_col,
+        subtype_levels=subtype_levels,
+        cn_state_tolerance=cn_state_tolerance,
+        et=et,
+    )
+
+    # ------------------------------------------------------------------
     # Model covariates.
     #
     # CN values below 1 are floored only inside the logarithmic term to
@@ -286,7 +466,7 @@ def prepare_gene_data(
     }
 
     if analysis_mode == "single_group":
-        # bdgdm_single.stan no longer declares S or subtype.
+        # bdgdm_single.stan does not declare S or subtype.
         stan_data = common_stan_data
     else:
         # bdgdm_subtype.stan requires S and one-based subtype indices.
@@ -304,6 +484,14 @@ def prepare_gene_data(
         N=int(len(df)),
         n_aneup=n_aneup,
         cna=cna,
+        cn_state_tolerance=float(cn_state_tolerance),
+        n_cn0=int(cn_support["n_cn0"]),
+        n_cn1=int(cn_support["n_cn1"]),
+        n_cn2=int(cn_support["n_cn2"]),
+        n_cn3=int(cn_support["n_cn3"]),
+        n_cn4=int(cn_support["n_cn4"]),
+        n_cn5plus=int(cn_support["n_cn5plus"]),
+        cn_support_by_subtype=cn_support_by_subtype,
     )
 
     return df, stan_data, metadata

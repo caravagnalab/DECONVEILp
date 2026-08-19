@@ -318,7 +318,7 @@ def fit_one_gene_bdgdm(
     subtype_order: list[str] | None = None,
     cna: Literal["all", "amp", "del"] = "all",
     et: float = 0.15,
-    min_aneup: int = 5,
+    min_aneup: int = 10,
     min_unique_counts: int = 5,
     min_cn_abs_sum: float = 1.0,
     config: BDGDMConfig | None = None,
