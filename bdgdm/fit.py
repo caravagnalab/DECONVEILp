@@ -306,6 +306,65 @@ def _resolve_gene_output_dir(
 
     
 
+def _flatten_cn_support_metadata(metadata: Any) -> dict[str, Any]:
+    """Flatten per-subtype empirical CN-support counts."""
+    output: dict[str, Any] = {}
+    subtype_levels = list(getattr(metadata, "subtype_levels", []) or [])
+    support = getattr(metadata, "cn_support_by_subtype", {}) or {}
+
+    if not isinstance(support, Mapping):
+        return output
+
+    keys = (
+        "N", "n_aneup", "n_cn0", "n_cn1", "n_cn2",
+        "n_cn3", "n_cn4", "n_cn5plus", "n_cn_other",
+    )
+
+    for s, label in enumerate(subtype_levels, start=1):
+        counts = support.get(str(label), {})
+        if not isinstance(counts, Mapping):
+            continue
+
+        for key in keys:
+            if key in counts:
+                try:
+                    output[f"{key}_s{s}"] = int(counts[key])
+                except (TypeError, ValueError, OverflowError):
+                    pass
+
+    return output
+
+
+def _classification_ready_metadata(
+    metadata: Any,
+    gene_name: str,
+) -> dict[str, Any]:
+    """Collect observed-data support needed by classify.py."""
+    output: dict[str, Any] = {
+        "gene": gene_name,
+        "analysis_mode": getattr(metadata, "analysis_mode", None),
+        "subtype_levels": list(getattr(metadata, "subtype_levels", []) or []),
+        "S": int(getattr(metadata, "S", 1)),
+        "N": int(getattr(metadata, "N", 0)),
+        "n_aneup": int(getattr(metadata, "n_aneup", 0)),
+        "cna": getattr(metadata, "cna", "all"),
+    }
+
+    for key in (
+        "cn_state_tolerance", "n_cn0", "n_cn1", "n_cn2",
+        "n_cn3", "n_cn4", "n_cn5plus", "n_cn_other",
+    ):
+        if hasattr(metadata, key):
+            value = getattr(metadata, key)
+            try:
+                output[key] = float(value) if key == "cn_state_tolerance" else int(value)
+            except (TypeError, ValueError, OverflowError):
+                pass
+
+    output.update(_flatten_cn_support_metadata(metadata))
+    return output
+
+
 # Main fitting function
 
 def fit_one_gene_bdgdm( 
@@ -318,6 +377,7 @@ def fit_one_gene_bdgdm(
     subtype_order: list[str] | None = None,
     cna: Literal["all", "amp", "del"] = "all",
     et: float = 0.15,
+    cn_state_tolerance: float | None = None,
     min_aneup: int = 10,
     min_unique_counts: int = 5,
     min_cn_abs_sum: float = 1.0,
@@ -378,6 +438,7 @@ def fit_one_gene_bdgdm(
         subtype_order=subtype_order,
         cna=cna,
         et=et,
+        cn_state_tolerance=cn_state_tolerance,
         min_aneup=min_aneup,
         min_unique_counts=min_unique_counts,
         min_cn_abs_sum=min_cn_abs_sum,
@@ -426,6 +487,13 @@ def fit_one_gene_bdgdm(
         eps_frac=config.eps_frac,
         return_all_subtypes=config.return_all_subtypes,
     )
+
+    classification_metadata = _classification_ready_metadata(
+        metadata,
+        gene_name,
+    )
+    for key, value in classification_metadata.items():
+        posterior.setdefault(key, value)
 
     diagnostics = sampler_diagnostics(
         stan_fit,
@@ -523,6 +591,7 @@ def fit_one_gene_bdgdm(
 
     metadata_output: dict[str, Any] = {
         **asdict(metadata),
+        **_flatten_cn_support_metadata(metadata),
         "processed_sample_count": int(
             len(processed_df)
         ),
@@ -535,6 +604,9 @@ def fit_one_gene_bdgdm(
         "preprocessing": {
             "cna": cna,
             "et": float(et),
+            "cn_state_tolerance": float(
+                getattr(metadata, "cn_state_tolerance", et)
+            ),
             "min_aneup": int(min_aneup),
             "min_unique_counts": int(
                 min_unique_counts
